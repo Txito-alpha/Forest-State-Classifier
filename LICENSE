@@ -1,0 +1,33 @@
+Rinkyo Classifier - QGIS plugin
+Copyright (C) 2026 Hokkaido IT Team
+
+This program is free software; you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation; either version 2 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program; if not, write to the Free Software
+Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
+MA 02110-1301, USA.
+
+-----------------------------------------------------------------------
+TODO before submitting to the QGIS plugin repository:
+Replace this file with the FULL text of the GNU General Public License
+version 2. The repository requires a LICENSE file inside the ZIP.
+Full text: https://www.gnu.org/licenses/old-licenses/gpl-2.0.txt
+-----------------------------------------------------------------------
+
+This plugin implements the workflow described in:
+  "衛星画像による林況把握方法 - オープンソースGISソフトによる
+   『教師なし分類』の作業手順（改訂版）", 2025年6月,
+   地方独立行政法人北海道立総合研究機構 森林研究本部 林業試験場
+
+The clustering and maximum likelihood classification are original
+numpy implementations of the algorithms that GRASS GIS provides as
+i.cluster and i.maxlik. No GRASS GIS code is included or linked.

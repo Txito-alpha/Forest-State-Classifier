@@ -1,0 +1,43 @@
+[general]
+name=Forest State Classifier
+qgisMinimumVersion=3.28
+description=Unsupervised classification of Sentinel-2 imagery for forest condition mapping, without GRASS GIS.
+description[ja]=衛星画像の教師なし分類による林況把握。GRASS GIS に依存しません。
+about=Implements the workflow of "Forest condition mapping using satellite imagery" (Hokkaido Research Organization, Forestry Research Institute, 2025) as a single plugin. Clustering and maximum likelihood classification are reimplemented in numpy, so no GRASS GIS installation or external process is required. Includes an interactive class labelling dialog with a Red-NIR scatter plot, raster attribute table output, signature reuse across years, and per-subcompartment aggregation.
+version=0.1.3
+author=Hokkaido IT Team
+email=CHANGE_ME@example.com
+
+tracker=https://github.com/Txito-alpha/Forest-State-Classifier/issues
+repository=https://github.com/Txito-alpha/Forest-State-Classifier
+homepage=https://github.com/Txito-alpha/Forest-State-Classifier
+
+category=Raster
+icon=icon.png
+experimental=True
+deprecated=False
+hasProcessingProvider=yes
+
+tags=raster,classification,remote sensing,forestry,sentinel,unsupervised,landcover
+
+changelog=0.1.3
+    - Renamed project to Forest State Classifier (repository moved to
+      Forest-State-Classifier)
+    - Added i18n scaffolding (i18n/ .pro file + translator loader) and
+      wrapped remaining UI strings in self.tr() for future translations
+    0.1.2
+    - Fix: classified rasters came out all grey when run from the Processing
+      toolbox, because class colours were only assigned inside the labelling
+      dialog. Category colours now live in core and are applied on every path.
+    - Unknown labels get a distinct fallback colour instead of grey
+    0.1.1
+    - Restore sys.stdout/sys.stderr on startup so that numpy import errors
+      are readable instead of surfacing as AttributeError on NoneType
+    - Warn when a shadowing numpy breaks the GDAL python bindings
+    0.1.0
+    - Initial release
+    - Clustering (i.cluster equivalent) and maximum likelihood classification (i.maxlik equivalent) in numpy
+    - Interactive labelling dialog with Red-NIR scatter plot
+    - Raster attribute table output
+    - Signature save and reuse for multi-year comparison
+    - Per-subcompartment aggregation

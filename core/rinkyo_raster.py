@@ -172,6 +172,10 @@ def classify_raster(src_path: str, sig: Signature, out_path: str,
     dst.SetGeoTransform(src.GetGeoTransform())
     dst.SetProjection(src.GetProjection())
     dst.GetRasterBand(1).SetNoDataValue(0)
+    # カラーテーブル (PhotometricInterpretation=Palette) は、GTiff の場合
+    # 画素を書き込み始めた後には設定できない (GDAL/libtiff の制約)。
+    # そのため RAT/カラーテーブルの適用はここで先に済ませる。
+    write_rat(dst, sig)
 
     lik = None
     if likelihood_path:
@@ -210,7 +214,6 @@ def classify_raster(src_path: str, sig: Signature, out_path: str,
         _report(progress, (bi + 1) * 100 // n_blocks,
                 "分類中… %d / %d" % (bi + 1, n_blocks))
 
-    write_rat(dst, sig)
     dst.FlushCache()
     dst = None
     if lik is not None:

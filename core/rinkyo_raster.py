@@ -287,6 +287,28 @@ def _hex_to_rgb(text: str):
 # ---------------------------------------------------------------------------
 # 5. クリップ（[マスクレイヤで切り抜く] の置き換え）
 # ---------------------------------------------------------------------------
+def clip_by_extent(src_path: str, out_path: str,
+                   extent: "tuple[float, float, float, float]",
+                   nodata: float = 0.0) -> str:
+    """バウンディングボックスで切り抜く。extent は (xmin, ymin, xmax, ymax)。
+
+    入力ラスタと同じ座標参照系で指定すること（呼び出し側で変換しておく）。
+    VRT など巨大な入力を、処理前に軽く軽量化する用途を想定している。
+    """
+    xmin, ymin, xmax, ymax = extent
+    if not (xmax > xmin and ymax > ymin):
+        raise ValueError("指定された範囲が不正です: %r" % (extent,))
+    opts = gdal.WarpOptions(
+        format="GTiff",
+        outputBounds=(xmin, ymin, xmax, ymax),
+        dstNodata=nodata,
+        creationOptions=_CREATE_OPTS,
+        targetAlignedPixels=False,
+    )
+    gdal.Warp(out_path, src_path, options=opts)
+    return out_path
+
+
 def clip_by_mask(src_path: str, mask_path: str, out_path: str,
                  nodata: float = 0.0, where: Optional[str] = None) -> str:
     """ポリゴンで切り抜く。gdal.Warp をライブラリとして直接呼ぶ。"""

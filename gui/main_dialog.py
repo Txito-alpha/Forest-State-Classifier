@@ -18,7 +18,7 @@ from qgis.PyQt.QtWidgets import (
     QVBoxLayout,
 )
 from qgis.core import QgsMapLayerProxyModel, QgsProject, QgsRasterLayer
-from qgis.gui import QgsMapLayerComboBox
+from qgis.gui import QgsExtentGroupBox, QgsMapLayerComboBox
 
 SETTINGS_GROUP = "HokkaidoITTeam/RinkyoClassifier"
 
@@ -26,8 +26,9 @@ SETTINGS_GROUP = "HokkaidoITTeam/RinkyoClassifier"
 class MainDialog(QDialog):
     """入力画像・クラス数・出力先を決める。設定は QSettings に残す。"""
 
-    def __init__(self, parent=None):
+    def __init__(self, iface=None, parent=None):
         super().__init__(parent)
+        self.iface = iface
         self.setWindowTitle(self.tr("衛星画像の教師なし分類"))
         self.resize(560, 620)
         self.signature_path: Optional[str] = None
@@ -45,6 +46,33 @@ class MainDialog(QDialog):
         input_form = QFormLayout(input_box)
         input_form.addRow(self.tr("ラスタレイヤ"), self.layer_combo)
         input_form.addRow(self.tr("使用バンド"), self.band_list)
+
+        # --- 処理範囲（VRT など巨大な入力を軽くするため） -------------------
+        self.extent_box = QgsExtentGroupBox(self)
+        self.extent_box.setTitle(self.tr("処理範囲を絞る（任意）"))
+        self.extent_box.setCheckable(True)
+        self.extent_box.setChecked(False)
+        self.extent_box.setToolTip(self.tr(
+            "VRT などサイズの大きい画像を、指定範囲だけに切り出してから\n"
+            "処理します。「現在のキャンバス範囲」または地図上での指定が\n"
+            "使えます。"))
+        if self.iface is not None:
+            self.extent_box.setMapCanvas(self.iface.mapCanvas())
+        else:
+            self.extent_box.setOutputCrs(QgsProject.instance().crs())
+
+        self.mask_combo = QgsMapLayerComboBox(self)
+        self.mask_combo.setFilters(QgsMapLayerProxyModel.PolygonLayer)
+        self.mask_combo.setAllowEmptyLayer(True)
+        self.mask_combo.setCurrentIndex(0)
+        self.mask_selected_only = QCheckBox(self.tr("選択地物のみを使う"), self)
+        mask_row = QHBoxLayout()
+        mask_row.addWidget(self.mask_combo, 1)
+        mask_row.addWidget(self.mask_selected_only)
+
+        extent_extra = QFormLayout()
+        extent_extra.addRow(self.tr("ポリゴンで切り抜く（任意）"), mask_row)
+        self.extent_box.layout().addLayout(extent_extra)
 
         # --- 分類設定 -----------------------------------------------------
         self.n_classes = QSpinBox(self)
@@ -141,6 +169,7 @@ class MainDialog(QDialog):
 
         root = QVBoxLayout(self)
         root.addWidget(input_box)
+        root.addWidget(self.extent_box)
         root.addWidget(param_box)
         root.addWidget(reuse_box)
         root.addWidget(out_box)
@@ -161,6 +190,8 @@ class MainDialog(QDialog):
         self.band_list.clear()
         if not isinstance(layer, QgsRasterLayer) or not layer.isValid():
             return
+        self.extent_box.setOriginalExtent(layer.extent(), layer.crs())
+        self.extent_box.setOutputCrs(layer.crs())
         provider = layer.dataProvider()
         for i in range(1, provider.bandCount() + 1):
             name = provider.generateBandName(i)
@@ -235,6 +266,13 @@ class MainDialog(QDialog):
     # -- 値の取り出し ------------------------------------------------------
     def parameters(self) -> dict:
         layer = self.layer_combo.currentLayer()
+        mask_layer = self.mask_combo.currentLayer()
+        clip_extent = None
+        if self.extent_box.isChecked():
+            r = self.extent_box.outputExtent()
+            if not r.isEmpty():
+                clip_extent = (r.xMinimum(), r.yMinimum(),
+                              r.xMaximum(), r.yMaximum())
         return {
             "stack_path": layer.source().split("|")[0],
             "layer_name": layer.name(),
@@ -250,6 +288,9 @@ class MainDialog(QDialog):
             "write_likelihood": self.likelihood_check.isChecked(),
             "signature_path": (self.reuse_edit.text()
                                if self.reuse_check.isChecked() else None),
+            "clip_extent": clip_extent,
+            "clip_mask_layer": mask_layer,
+            "clip_selected_only": self.mask_selected_only.isChecked(),
         }
 
     # -- 設定の保存と復元 --------------------------------------------------

@@ -45,6 +45,8 @@ class ClassifyTask(QgsTask):
         nodata: float = 0.0,
         write_likelihood: bool = True,
         signature: Optional[rc.Signature] = None,
+        clip_extent: Optional[Sequence[float]] = None,
+        clip_mask_path: Optional[str] = None,
     ):
         super().__init__("教師なし分類", QgsTask.CanCancel)
         self.stack_path = stack_path
@@ -59,6 +61,10 @@ class ClassifyTask(QgsTask):
         self.bands = list(bands) if bands else None
         self.nodata = nodata
         self.write_likelihood = write_likelihood
+        # (xmin, ymin, xmax, ymax)。入力ラスタと同じ CRS で渡すこと。
+        self.clip_extent = tuple(clip_extent) if clip_extent else None
+        # ポリゴンで切り抜く場合のマスクベクタ（ファイルパス）。
+        self.clip_mask_path = clip_mask_path
 
         self.signature: Optional[rc.Signature] = signature
         self.result_path: Optional[str] = None
@@ -80,9 +86,15 @@ class ClassifyTask(QgsTask):
             os.makedirs(self.out_dir, exist_ok=True)
             reuse = self.signature is not None
 
+            stack_path = self.stack_path
+            if self.clip_extent or self.clip_mask_path:
+                stack_path = self._clip_input()
+                if self.isCanceled():
+                    return False
+
             if not reuse:
                 samples, names = rr.sample_raster(
-                    self.stack_path,
+                    stack_path,
                     max_samples=self.max_samples,
                     bands=self.bands,
                     nodata=self.nodata,
@@ -146,7 +158,7 @@ class ClassifyTask(QgsTask):
                     self.out_dir, self.basename + "_loglik.tif")
 
             rr.classify_raster(
-                self.stack_path,
+                stack_path,
                 self.signature,
                 self.result_path,
                 bands=self.bands,
@@ -177,3 +189,24 @@ class ClassifyTask(QgsTask):
             if "ndvi" in (name or "").lower():
                 return i
         return None
+
+    # -- 処理範囲の切り出し --------------------------------------------------
+    def _clip_input(self) -> str:
+        """VRT など巨大な入力を、指定範囲だけの一時ラスタに切り出す。
+
+        範囲(bbox)とマスクポリゴンの両方が指定されている場合は、
+        まず bbox で軽く絞ってから、ポリゴンで正確に切り抜く。
+        """
+        self.setDescription("処理範囲を切り出し中…")
+        stack_path = self.stack_path
+        if self.clip_extent:
+            bbox_path = os.path.join(self.out_dir, self.basename + "_clip_bbox.tif")
+            stack_path = rr.clip_by_extent(
+                stack_path, bbox_path, self.clip_extent, nodata=self.nodata)
+            self.messages.append("処理範囲(bbox)で切り出しました: %s" % self.clip_extent)
+        if self.clip_mask_path:
+            mask_out = os.path.join(self.out_dir, self.basename + "_clip.tif")
+            stack_path = rr.clip_by_mask(
+                stack_path, self.clip_mask_path, mask_out, nodata=self.nodata)
+            self.messages.append("指定ポリゴンで切り抜きました。")
+        return stack_path

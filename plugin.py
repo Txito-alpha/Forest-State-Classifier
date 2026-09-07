@@ -16,7 +16,8 @@ from qgis.PyQt.QtCore import QCoreApplication
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction, QMessageBox, QToolBar
 from qgis.core import (
-    Qgis, QgsApplication, QgsMessageLog, QgsProject, QgsRasterLayer,
+    Qgis, QgsApplication, QgsCoordinateTransformContext,
+    QgsMessageLog, QgsProject, QgsRasterLayer, QgsVectorFileWriter,
 )
 
 from .core.rinkyo_core import Signature
@@ -106,9 +107,31 @@ class RinkyoClassifierPlugin:
     def tr(message: str) -> str:
         return QCoreApplication.translate("RinkyoClassifier", message)
 
+    # -- 処理範囲（ポリゴン切り抜き用の一時ファイル書き出し） ----------------
+    @staticmethod
+    def _write_mask_layer(layer, out_dir: str, basename: str,
+                          selected_only: bool) -> str:
+        """切り抜き用ポリゴンを、GDAL から読める一時 GeoPackage に書き出す。
+
+        「選択地物のみ」が指定されていて、実際に選択がなければ
+        全地物を対象にする（うっかり空振りしないための保険）。
+        """
+        path = os.path.join(out_dir, basename + "_clip_mask.gpkg")
+        options = QgsVectorFileWriter.SaveVectorOptions()
+        options.driverName = "GPKG"
+        options.onlySelectedFeatures = bool(
+            selected_only and layer.selectedFeatureCount())
+        err = QgsVectorFileWriter.writeAsVectorFormatV3(
+            layer, path, QgsCoordinateTransformContext(), options)
+        # writeAsVectorFormatV3 は (エラーコード, メッセージ, ...) のタプルを返す
+        code = err[0] if isinstance(err, tuple) else err
+        if code != QgsVectorFileWriter.NoError:
+            raise OSError(str(err))
+        return path
+
     # -- 実行 --------------------------------------------------------------
     def run(self):
-        dialog = MainDialog(self.iface.mainWindow())
+        dialog = MainDialog(self.iface, self.iface.mainWindow())
         if not dialog.exec_():
             return
         params = dialog.parameters()
@@ -124,6 +147,19 @@ class RinkyoClassifierPlugin:
                     self.tr("シグネチャを読めません:\n%s") % exc)
                 return
 
+        clip_mask_path = None
+        mask_layer = params.get("clip_mask_layer")
+        if mask_layer is not None:
+            try:
+                clip_mask_path = self._write_mask_layer(
+                    mask_layer, params["out_dir"], params["basename"],
+                    params["clip_selected_only"])
+            except OSError as exc:
+                QMessageBox.critical(
+                    self.iface.mainWindow(), self.tr("エラー"),
+                    self.tr("切り抜き用ポリゴンを書き出せません:\n%s") % exc)
+                return
+
         task = ClassifyTask(
             stack_path=params["stack_path"],
             out_dir=params["out_dir"],
@@ -137,6 +173,8 @@ class RinkyoClassifierPlugin:
             bands=params["bands"],
             write_likelihood=params["write_likelihood"],
             signature=signature,
+            clip_extent=params.get("clip_extent"),
+            clip_mask_path=clip_mask_path,
         )
         task.taskCompleted.connect(lambda t=task: self._on_done(t))
         task.taskTerminated.connect(lambda t=task: self._on_failed(t))

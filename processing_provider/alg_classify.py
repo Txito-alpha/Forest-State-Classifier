@@ -11,10 +11,12 @@ import os
 
 from qgis.PyQt.QtCore import QCoreApplication
 from qgis.core import (
-    QgsProcessingAlgorithm, QgsProcessingException,
-    QgsProcessingParameterBoolean, QgsProcessingParameterFile,
-    QgsProcessingParameterFolderDestination, QgsProcessingParameterNumber,
-    QgsProcessingParameterRasterLayer, QgsProcessingParameterString,
+    QgsCoordinateTransformContext, QgsProcessing, QgsProcessingAlgorithm,
+    QgsProcessingException, QgsProcessingParameterBoolean,
+    QgsProcessingParameterExtent, QgsProcessingParameterFeatureSource,
+    QgsProcessingParameterFile, QgsProcessingParameterFolderDestination,
+    QgsProcessingParameterNumber, QgsProcessingParameterRasterLayer,
+    QgsProcessingParameterString, QgsVectorFileWriter,
 )
 
 from ..core import rinkyo_core as rc
@@ -30,6 +32,8 @@ ITERATIONS = "ITERATIONS"
 SIGNATURE_IN = "SIGNATURE_IN"
 BASENAME = "BASENAME"
 LIKELIHOOD = "LIKELIHOOD"
+EXTENT = "EXTENT"
+MASK = "MASK"
 OUTPUT = "OUTPUT"
 
 
@@ -59,6 +63,12 @@ class UnsupervisedClassifyAlgorithm(QgsProcessingAlgorithm):
             BASENAME, self.tr("出力ファイル名の接頭辞"), "rinkyo"))
         self.addParameter(QgsProcessingParameterBoolean(
             LIKELIHOOD, self.tr("対数尤度ラスタも出力する"), True))
+        self.addParameter(QgsProcessingParameterExtent(
+            EXTENT, self.tr("処理範囲（任意・VRT など巨大な入力向け）"),
+            optional=True))
+        self.addParameter(QgsProcessingParameterFeatureSource(
+            MASK, self.tr("切り抜き用ポリゴン（任意）"),
+            [QgsProcessing.TypeVectorPolygon], optional=True))
         self.addParameter(QgsProcessingParameterFolderDestination(
             OUTPUT, self.tr("出力フォルダ")))
 
@@ -75,6 +85,33 @@ class UnsupervisedClassifyAlgorithm(QgsProcessingAlgorithm):
         def progress(pct, msg):
             feedback.setProgress(pct)
             feedback.setProgressText(msg)
+
+        # --- 処理範囲を絞る（VRT など巨大な入力向け） ----------------------
+        if not self.parameterAsExtent(parameters, EXTENT, context).isEmpty():
+            extent = self.parameterAsExtent(
+                parameters, EXTENT, context, layer.crs())
+            bbox_path = os.path.join(out_dir, base + "_clip_bbox.tif")
+            src = rr.clip_by_extent(
+                src, bbox_path,
+                (extent.xMinimum(), extent.yMinimum(),
+                 extent.xMaximum(), extent.yMaximum()))
+            feedback.pushInfo(self.tr("処理範囲(bbox)で切り出しました。"))
+
+        mask_source = self.parameterAsSource(parameters, MASK, context)
+        if mask_source is not None and mask_source.featureCount():
+            mask_path = os.path.join(out_dir, base + "_clip_mask.gpkg")
+            options = QgsVectorFileWriter.SaveVectorOptions()
+            options.driverName = "GPKG"
+            err = QgsVectorFileWriter.writeAsVectorFormatV3(
+                mask_source, mask_path, QgsCoordinateTransformContext(),
+                options)
+            code = err[0] if isinstance(err, tuple) else err
+            if code != QgsVectorFileWriter.NoError:
+                raise QgsProcessingException(
+                    self.tr("切り抜き用ポリゴンを書き出せません: %s") % (err,))
+            clip_path = os.path.join(out_dir, base + "_clip.tif")
+            src = rr.clip_by_mask(src, mask_path, clip_path)
+            feedback.pushInfo(self.tr("指定ポリゴンで切り抜きました。"))
 
         sig_in = self.parameterAsFile(parameters, SIGNATURE_IN, context)
         if sig_in:
@@ -146,7 +183,10 @@ class UnsupervisedClassifyAlgorithm(QgsProcessingAlgorithm):
             "Sentinel-2 の Blue/Green/Red/NIR/NDVI からクラスタリングを行い、"
             "最尤法で全画素を分類します。GRASS GIS には依存しません。\n\n"
             "既存シグネチャを指定すると、別年次の画像に同じ分類基準を"
-            "当てられるので、クラス番号の意味が揃った経年比較ができます。")
+            "当てられるので、クラス番号の意味が揃った経年比較ができます。\n\n"
+            "入力が VRT など巨大な場合は、「処理範囲」（キャンバス範囲など）"
+            "や「切り抜き用ポリゴン」を指定すると、その範囲だけを"
+            "先に切り出してから処理するので大幅に高速化できます。")
 
     def createInstance(self):
         return UnsupervisedClassifyAlgorithm()

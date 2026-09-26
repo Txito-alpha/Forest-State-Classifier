@@ -13,10 +13,15 @@ License: GPL v2
 
 from __future__ import annotations
 
+import json
+import os
+
 from typing import Callable, Dict, List, Optional, Sequence
 
 import numpy as np
 from osgeo import gdal, ogr
+
+from .categories import DEFAULT_CATEGORIES
 
 gdal.UseExceptions()
 ogr.UseExceptions()
@@ -31,6 +36,7 @@ def zonal_class_counts(
     polygon_path: str,
     layer_name: Optional[str] = None,
     where: Optional[str] = None,
+    feature_ids: Optional[Sequence[int]] = None,
     key_fields: Sequence[str] = ("署名称", "林班主番", "小班名", "小班枝番"),
     progress: Progress = None,
 ) -> Dict[str, object]:
@@ -53,6 +59,14 @@ def zonal_class_counts(
     band = ras.GetRasterBand(1)
     rat = band.GetDefaultRAT()
     labels = _labels_from_rat(rat)
+
+    # ラベル編集後の正本は分類ラスタと同名系列の signature JSON。
+    # GeoTIFF のRATは環境・ドライバによって更新後も "class 1" 等のまま
+    # 読み出されることがあるため、隣接JSONがあればそのlabelsを優先する。
+    signature_labels = _labels_from_signature(class_raster)
+    if signature_labels:
+        labels = ["未分類"] + signature_labels
+
     n_classes = len(labels)
 
     # --- ポリゴンを 1..N の連番で焼く --------------------------------------
@@ -60,8 +74,18 @@ def zonal_class_counts(
     if src is None:
         raise ValueError("ポリゴンを開けません: %s" % polygon_path)
     lyr = src.GetLayerByName(layer_name) if layer_name else src.GetLayer(0)
+    filters = []
     if where:
-        lyr.SetAttributeFilter(where)
+        filters.append("(%s)" % where)
+    if feature_ids:
+        # QGIS の選択地物 ID は OGR の FID に対応する。
+        # FID は OGR SQL の擬似列として多くのファイル形式で利用できる。
+        ids = ",".join(str(int(fid)) for fid in feature_ids)
+        filters.append("FID IN (%s)" % ids)
+    if filters:
+        err = lyr.SetAttributeFilter(" AND ".join(filters))
+        if err != 0:
+            raise ValueError("選択地物の抽出条件を適用できませんでした")
 
     mem_drv = ogr.GetDriverByName("Memory")
     mem_ds = mem_drv.CreateDataSource("zonal")
@@ -125,20 +149,40 @@ def to_records(result: Dict[str, object],
     area = float(result["pixel_area"])  # type: ignore[arg-type]
 
     start = 1 if exclude_unclassified else 0
+
+    # 同じ林況ラベルが複数のclassへ割り当てられている場合は、
+    # class番号別ではなくラベル別に画素数を合算する。
+    # ラベルの出現順はRAT上の最初のclass順を維持する。
+    label_indices: Dict[str, List[int]] = {}
+    for c in range(start, len(labels)):
+        name = (labels[c] or "").strip() or "class%d" % c
+        label_indices.setdefault(name, []).append(c)
+
+    # 標準の林況ラベルは、該当画素が0でも必ず出力列を作る。
+    # RATにそのラベルが存在しない場合は空のindexリストにして0集計とする。
+    # これにより「常緑針葉樹林_画素数」等がXLSX/GPKGから欠落しない。
+    for name, _color in DEFAULT_CATEGORIES:
+        if exclude_unclassified and name == "未分類":
+            continue
+        label_indices.setdefault(name, [])
+
     denom = counts[:, start:].sum(axis=1).astype(np.float64)
     denom[denom == 0] = np.nan
 
     records = []
     for i, key in enumerate(result["keys"]):  # type: ignore[arg-type]
         rec: Dict[str, object] = dict(key)
-        rec["集計画素数"] = int(counts[i, start:].sum())
-        rec["集計面積_ha"] = float(counts[i, start:].sum() * area / 10000.0)
-        for c in range(start, len(labels)):
-            name = labels[c] or "class%d" % c
-            rec["%s_画素数" % name] = int(counts[i, c])
-            rec["%s_ha" % name] = float(counts[i, c] * area / 10000.0)
-            ratio = counts[i, c] / denom[i] * 100.0
-            rec["%s_率" % name] = None if np.isnan(ratio) else round(float(ratio), 2)
+        total = int(counts[i, start:].sum())
+        rec["集計画素数"] = total
+        rec["集計面積_ha"] = float(total * area / 10000.0)
+
+        for name, indices in label_indices.items():
+            label_count = int(counts[i, indices].sum()) if indices else 0
+            rec["%s_画素数" % name] = label_count
+            rec["%s_ha" % name] = float(label_count * area / 10000.0)
+            ratio = label_count / denom[i] * 100.0
+            rec["%s_率" % name] = (None if np.isnan(ratio)
+                                   else round(float(ratio), 2))
         records.append(rec)
     return records
 
@@ -156,6 +200,31 @@ def _rasterize_index(layer, w, h, gt, proj, n_zones):
                         options=["ATTRIBUTE=%s" % _INDEX_FIELD,
                                  "ALL_TOUCHED=FALSE"])
     return ds
+
+
+def _labels_from_signature(class_raster: str) -> Optional[List[str]]:
+    """分類ラスタに対応するsignature JSONからclassラベルを得る。"""
+    raster_path = class_raster.split("|")[0]
+    stem, _ext = os.path.splitext(raster_path)
+    if stem.endswith("_class"):
+        stem = stem[:-6]
+    signature_path = stem + "_signature.json"
+    if not os.path.isfile(signature_path):
+        return None
+    try:
+        with open(signature_path, encoding="utf-8-sig") as fh:
+            data = json.load(fh)
+        raw = data.get("labels")
+        if not isinstance(raw, list) or not raw:
+            return None
+        labels = []
+        for i, value in enumerate(raw, 1):
+            text = str(value).strip() if value is not None else ""
+            labels.append(text or "class %d" % i)
+        return labels
+    except (OSError, ValueError, TypeError):
+        # JSONが無い・壊れている場合だけRATへフォールバックする。
+        return None
 
 
 def _labels_from_rat(rat) -> List[str]:

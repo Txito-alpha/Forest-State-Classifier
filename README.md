@@ -18,10 +18,19 @@ classification are reimplemented in numpy.
 - Raster attribute table output
 - Signature reuse across years for multi-year comparison
 - Per-subcompartment (小班) aggregation
+- Folder input with recursive search: mosaic into one VRT, or classify file by file
+  with a shared signature / フォルダ入力（再帰検索）: VRT モザイク、またはファイルごとの分類
 
 ## Requirements
 
 - QGIS >= 3.28
+
+## Tests
+
+```
+python3 tests/test_core.py    # numpy only
+python3 tests/test_batch.py   # numpy + GDAL (folder input)
+```
 
 ## Internationalization / 多言語対応
 

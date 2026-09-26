@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 from typing import Optional
 
+from qgis.PyQt import sip
 from qgis.PyQt.QtCore import QCoreApplication
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction, QMessageBox, QToolBar
@@ -20,6 +21,7 @@ from qgis.core import (
     QgsMessageLog, QgsProject, QgsRasterLayer, QgsVectorFileWriter,
 )
 
+from .core import pipeline
 from .core.rinkyo_core import Signature
 from .core.rinkyo_raster import write_rat
 from .gui.label_dialog import LabelDialog, apply_signature_style
@@ -67,14 +69,13 @@ class RinkyoClassifierPlugin:
     def unload(self):
         for action in self.actions:
             self.iface.removePluginRasterMenu(self.tr(MENU_TITLE), action)
-            if self.toolbar:
+            if self.toolbar is not None and not sip.isdeleted(self.toolbar):
                 self.toolbar.removeAction(action)
         self.actions = []
-        if self.provider is not None:
-            QgsApplication.processingRegistry().removeProvider(self.provider)
-            self.provider = None
+        self._unregister_provider()
         # ツールバーは他プラグインと共有しているので、空のときだけ片付ける
-        if self.toolbar is not None and not self.toolbar.actions():
+        if (self.toolbar is not None and not sip.isdeleted(self.toolbar)
+                and not self.toolbar.actions()):
             self.iface.mainWindow().removeToolBar(self.toolbar)
             self.toolbar.deleteLater()
         self.toolbar = None
@@ -100,8 +101,37 @@ class RinkyoClassifierPlugin:
                 self.tr("プロセシングプロバイダを読み込めません: %s") % exc,
                 LOG_TAG, Qgis.Warning)
             return
-        self.provider = RinkyoProvider()
-        QgsApplication.processingRegistry().addProvider(self.provider)
+        registry = QgsApplication.processingRegistry()
+        provider = RinkyoProvider()
+        existing = registry.providerById(provider.id())
+        if existing is not None:
+            # 同じ id のプロバイダが既に登録されている（旧版や別フォルダの
+            # 同じプラグインが同時に有効など）。addProvider に渡すと C++ 側で
+            # provider が即座に delete され、unload 時に
+            # "wrapped C/C++ object ... has been deleted" になるので登録しない。
+            QgsMessageLog.logMessage(
+                self.tr("プロセシングプロバイダ '%s' は既に登録されています。"
+                        "同じプラグインが別フォルダに重複してインストール"
+                        "されていないか確認してください。") % provider.id(),
+                LOG_TAG, Qgis.Warning)
+            return
+        if registry.addProvider(provider):
+            self.provider = provider
+        else:
+            # 失敗時は registry が provider を delete 済み。参照を持たない。
+            QgsMessageLog.logMessage(
+                self.tr("プロセシングプロバイダを登録できませんでした。"),
+                LOG_TAG, Qgis.Warning)
+
+    def _unregister_provider(self):
+        provider, self.provider = self.provider, None
+        if provider is None or sip.isdeleted(provider):
+            return
+        try:
+            QgsApplication.processingRegistry().removeProvider(provider)
+        except RuntimeError:
+            # QGIS 終了処理などで既に破棄されている場合は無視する
+            pass
 
     @staticmethod
     def tr(message: str) -> str:
@@ -151,8 +181,10 @@ class RinkyoClassifierPlugin:
         mask_layer = params.get("clip_mask_layer")
         if mask_layer is not None:
             try:
+                os.makedirs(params["out_dir"], exist_ok=True)
                 clip_mask_path = self._write_mask_layer(
-                    mask_layer, params["out_dir"], params["basename"],
+                    mask_layer, params["out_dir"],
+                    params["basename"] or "rinkyo",
                     params["clip_selected_only"])
             except OSError as exc:
                 QMessageBox.critical(
@@ -175,6 +207,11 @@ class RinkyoClassifierPlugin:
             signature=signature,
             clip_extent=params.get("clip_extent"),
             clip_mask_path=clip_mask_path,
+            mode=params["input_mode"],
+            input_paths=params["input_paths"],
+            input_root=params["input_root"],
+            shared_signature=params["shared_signature"],
+            keep_tree=params["keep_tree"],
         )
         task.taskCompleted.connect(lambda t=task: self._on_done(t))
         task.taskTerminated.connect(lambda t=task: self._on_failed(t))
@@ -187,6 +224,9 @@ class RinkyoClassifierPlugin:
     def _on_done(self, task: ClassifyTask):
         for msg in task.messages:
             QgsMessageLog.logMessage(msg, LOG_TAG, Qgis.Info)
+        if task.mode == pipeline.MODE_EACH:
+            self._on_batch_done(task)
+            return
 
         layer = QgsRasterLayer(task.result_path,
                                task.basename + self.tr(" 分類結果"))
@@ -207,9 +247,59 @@ class RinkyoClassifierPlugin:
             if lik.isValid():
                 QgsProject.instance().addMapLayer(lik)
 
-        self.iface.messageBar().pushMessage(
-            self.tr("林況分類"), self.tr("完了しました: %s") % os.path.basename(task.result_path),
-            level=Qgis.Success, duration=8)
+        self._push_summary(task, os.path.basename(task.result_path))
+
+    def _on_batch_done(self, task: ClassifyTask):
+        """ファイルごと処理の完了。結果はレイヤグループにまとめて追加する。
+
+        共通シグネチャなら意味づけは 1 回だけ行い、全結果に書き戻す。
+        個別シグネチャの場合は件数が多くなりうるのでダイアログは出さず、
+        必要なレイヤだけ「分類結果の意味づけ…」でやり直してもらう。
+        """
+        shared = task.outcome.shared_signature
+        if shared is not None and task.results:
+            dialog = LabelDialog(shared, self.iface.mainWindow())
+            if dialog.exec_():
+                self._rewrite_labels(task, dialog.signature)
+
+        project = QgsProject.instance()
+        title = "%s %s" % (task.basename or self.tr("林況分類"),
+                           self.tr("分類結果"))
+        group = project.layerTreeRoot().insertGroup(0, title)
+        added = 0
+        for res in task.results:
+            name = res.basename + self.tr(" 分類結果")
+            layer = QgsRasterLayer(res.result_path, name)
+            if not layer.isValid():
+                QgsMessageLog.logMessage(
+                    self.tr("分類結果を読み込めませんでした: %s")
+                    % res.result_path, LOG_TAG, Qgis.Warning)
+                continue
+            apply_signature_style(layer, res.signature)
+            project.addMapLayer(layer, False)
+            group.addLayer(layer)
+            added += 1
+        if not added:
+            project.layerTreeRoot().removeChildNode(group)
+        self._push_summary(
+            task, self.tr("%d 件（%s）") % (added, task.out_dir))
+
+    def _push_summary(self, task: ClassifyTask, what: str):
+        outcome = task.outcome
+        problems = (outcome.skipped + outcome.failures) if outcome else []
+        if problems:
+            self.iface.messageBar().pushMessage(
+                self.tr("林況分類"),
+                self.tr("完了しました: %s　スキップ・失敗 %d 件"
+                        "（ログメッセージパネルを確認してください）")
+                % (what, len(problems)),
+                level=Qgis.Warning, duration=0)
+            for text in problems:
+                QgsMessageLog.logMessage(text, LOG_TAG, Qgis.Warning)
+        else:
+            self.iface.messageBar().pushMessage(
+                self.tr("林況分類"), self.tr("完了しました: %s") % what,
+                level=Qgis.Success, duration=8)
 
     def _on_failed(self, task: ClassifyTask):
         if task.exception:
@@ -224,18 +314,23 @@ class RinkyoClassifierPlugin:
     def _rewrite_labels(self, task: ClassifyTask, signature: Signature):
         """意味づけの結果をラスタ属性テーブルとシグネチャに書き戻す。"""
         from osgeo import gdal
-        try:
-            ds = gdal.Open(task.result_path, gdal.GA_Update)
-            write_rat(ds, signature)
-            ds.FlushCache()
-            ds = None
-        except RuntimeError as exc:
-            QgsMessageLog.logMessage(
-                self.tr("ラスタ属性テーブルを更新できません: %s") % exc,
-                LOG_TAG, Qgis.Warning)
-        if task.signature_path:
-            with open(task.signature_path, "w", encoding="utf-8") as fh:
-                fh.write(signature.to_json())
+        for res in task.results:
+            try:
+                ds = gdal.Open(res.result_path, gdal.GA_Update)
+                write_rat(ds, signature)
+                ds.FlushCache()
+                ds = None
+            except RuntimeError as exc:
+                QgsMessageLog.logMessage(
+                    self.tr("ラスタ属性テーブルを更新できません: %s") % exc,
+                    LOG_TAG, Qgis.Warning)
+            res.signature = signature
+            if res.signature_path:
+                with open(res.signature_path, "w", encoding="utf-8") as fh:
+                    fh.write(signature.to_json())
+        if task.outcome is not None and \
+                task.outcome.shared_signature is not None:
+            task.outcome.shared_signature = signature
 
     # -- 意味づけのやり直し ------------------------------------------------
     def relabel(self):
@@ -245,8 +340,10 @@ class RinkyoClassifierPlugin:
                 self.iface.mainWindow(), self.tr("確認"),
                 self.tr("分類結果のラスタレイヤを選んでから実行してください。"))
             return
-        sig_path = os.path.splitext(layer.source())[0].replace(
-            "_class", "") + "_signature.json"
+        stem = os.path.splitext(layer.source().split("|")[0])[0]
+        if stem.endswith("_class"):
+            stem = stem[:-len("_class")]
+        sig_path = stem + "_signature.json"
         if not os.path.isfile(sig_path):
             QMessageBox.information(
                 self.iface.mainWindow(), self.tr("確認"),

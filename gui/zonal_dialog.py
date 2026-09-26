@@ -2,9 +2,9 @@
 """
 zonal_dialog - 分類結果を小班ごとに集計する画面
 
-出力は「小班のコピー＋クラス別の面積・割合フィールド」を持つ
-GeoPackage レイヤ。属性の空間結合とゾーンヒストグラムを別々に
-回す必要がなくなる。
+出力は「小班属性＋ラベル別の面積・割合フィールド」を持つ
+GeoPackage レイヤ、または Excel ブック。属性の空間結合と
+ゾーンヒストグラムを別々に回す必要がなくなる。
 
 License: GPL v2
 """
@@ -20,8 +20,8 @@ from qgis.PyQt.QtWidgets import (
     QVBoxLayout,
 )
 from qgis.core import (
-    QgsFeature, QgsField, QgsFields, QgsMapLayerProxyModel, QgsProject,
-    QgsVectorFileWriter, QgsVectorLayer, QgsWkbTypes,
+    QgsFeature, QgsFeatureRequest, QgsField, QgsFields, QgsMapLayerProxyModel,
+    QgsProject, QgsVectorFileWriter, QgsVectorLayer, QgsWkbTypes,
 )
 from qgis.gui import QgsMapLayerComboBox
 from qgis.PyQt.QtCore import QVariant
@@ -62,7 +62,7 @@ class ZonalDialog(QDialog):
         form.addRow(self.tr("分類結果ラスタ"), self.raster_combo)
         form.addRow(self.tr("小班ポリゴン"), self.polygon_combo)
         form.addRow("", self.exclude_check)
-        form.addRow(self.tr("出力 GeoPackage"), out_row)
+        form.addRow(self.tr("出力ファイル（GPKG / XLSX）"), out_row)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.Ok | QDialogButtonBox.Cancel, Qt.Horizontal, self)
@@ -80,11 +80,16 @@ class ZonalDialog(QDialog):
         out_button.clicked.connect(self._pick_out)
 
     def _pick_out(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(
-            self, self.tr("出力先"), self.out_edit.text(), self.tr("GeoPackage (*.gpkg)"))
+        path, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            self.tr("出力先"),
+            self.out_edit.text(),
+            self.tr("GeoPackage (*.gpkg);;Excel ブック (*.xlsx)"),
+        )
         if path:
-            if not path.lower().endswith(".gpkg"):
-                path += ".gpkg"
+            lower = path.lower()
+            if not lower.endswith((".gpkg", ".xlsx")):
+                path += ".xlsx" if "*.xlsx" in selected_filter else ".gpkg"
             self.out_edit.setText(path)
 
     def _progress(self, pct: int, msg: str) -> None:
@@ -101,6 +106,12 @@ class ZonalDialog(QDialog):
         if not out_path:
             QMessageBox.warning(self, self.tr("確認"), self.tr("出力先を指定してください。"))
             return
+        suffix = os.path.splitext(out_path)[1].lower()
+        if suffix not in (".gpkg", ".xlsx"):
+            QMessageBox.warning(
+                self, self.tr("確認"),
+                self.tr("出力形式は .gpkg または .xlsx を指定してください。"))
+            return
         if raster.crs() != polygon.crs():
             QMessageBox.warning(
                 self, self.tr("確認"),
@@ -109,30 +120,40 @@ class ZonalDialog(QDialog):
                 % (raster.crs().authid(), polygon.crs().authid()))
             return
 
+        selected_ids = [int(fid) for fid in polygon.selectedFeatureIds()]
+        if selected_ids:
+            target_message = self.tr("選択中の小班 %d 件を集計します。") % len(selected_ids)
+        else:
+            target_message = self.tr("選択がないため、全小班を集計します。")
+        self.progress.setToolTip(target_message)
+
         self.progress.setVisible(True)
         try:
             result = zonal_class_counts(
                 raster.source().split("|")[0],
                 polygon.source().split("|")[0],
+                feature_ids=selected_ids or None,
                 progress=self._progress,
             )
             records = to_records(
                 result, exclude_unclassified=self.exclude_check.isChecked())
-            self._write(polygon, records, out_path)
+            self._write(polygon, records, out_path, selected_ids or None)
         except (OSError, ValueError, RuntimeError, MemoryError) as exc:
             self.progress.setVisible(False)
             QMessageBox.critical(self, self.tr("エラー"), str(exc))
             return
 
-        layer = QgsVectorLayer(out_path, os.path.splitext(
-            os.path.basename(out_path))[0], "ogr")
-        if layer.isValid():
-            QgsProject.instance().addMapLayer(layer)
+        if out_path.lower().endswith(".gpkg"):
+            layer = QgsVectorLayer(out_path, os.path.splitext(
+                os.path.basename(out_path))[0], "ogr")
+            if layer.isValid():
+                QgsProject.instance().addMapLayer(layer)
         self.progress.setVisible(False)
         self.accept()
 
-    def _write(self, polygon: QgsVectorLayer, records, out_path: str) -> None:
-        """元の小班属性 + 集計結果を GeoPackage に書き出す。"""
+    def _write(self, polygon: QgsVectorLayer, records, out_path: str,
+               selected_ids=None) -> None:
+        """対象小班の属性 + 集計結果を GPKG または XLSX に書き出す。"""
         by_fid = {int(r.pop("_fid")): r for r in records}
         if not by_fid:
             raise ValueError(self.tr("集計対象のポリゴンがありませんでした。"))
@@ -152,23 +173,30 @@ class ZonalDialog(QDialog):
             else:
                 fields.append(QgsField(name, QVariant.String))
 
+        is_xlsx = out_path.lower().endswith(".xlsx")
         options = QgsVectorFileWriter.SaveVectorOptions()
-        options.driverName = "GPKG"
+        options.driverName = "XLSX" if is_xlsx else "GPKG"
         options.fileEncoding = "UTF-8"
+        options.layerName = self.tr("小班別集計")
+        geometry_type = QgsWkbTypes.NoGeometry if is_xlsx else QgsWkbTypes.MultiPolygon
+        output_crs = polygon.crs()
         writer = QgsVectorFileWriter.create(
-            out_path, fields, QgsWkbTypes.MultiPolygon, polygon.crs(),
+            out_path, fields, geometry_type, output_crs,
             QgsProject.instance().transformContext(), options)
         if writer.hasError() != QgsVectorFileWriter.NoError:
             raise OSError(self.tr("書き出しに失敗しました: %s") % writer.errorMessage())
 
         missing = 0
-        for src in polygon.getFeatures():
+        request = (QgsFeatureRequest().setFilterFids(selected_ids)
+                   if selected_ids else QgsFeatureRequest())
+        for src in polygon.getFeatures(request):
             rec = by_fid.get(int(src.id()))
             if rec is None:
                 missing += 1
                 continue
             feat = QgsFeature(fields)
-            feat.setGeometry(src.geometry())
+            if not is_xlsx:
+                feat.setGeometry(src.geometry())
             for field in polygon.fields():
                 feat[field.name()] = src[field.name()]
             for name in extra:

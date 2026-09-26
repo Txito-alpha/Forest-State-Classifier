@@ -11,19 +11,26 @@ import os
 
 from qgis.PyQt.QtCore import QCoreApplication
 from qgis.core import (
-    QgsCoordinateTransformContext, QgsProcessing, QgsProcessingAlgorithm,
-    QgsProcessingException, QgsProcessingParameterBoolean,
-    QgsProcessingParameterExtent, QgsProcessingParameterFeatureSource,
-    QgsProcessingParameterFile, QgsProcessingParameterFolderDestination,
-    QgsProcessingParameterNumber, QgsProcessingParameterRasterLayer,
-    QgsProcessingParameterString, QgsVectorFileWriter,
+    QgsCoordinateReferenceSystem, QgsCoordinateTransformContext,
+    QgsProcessing, QgsProcessingAlgorithm, QgsProcessingException,
+    QgsProcessingOutputNumber, QgsProcessingParameterBoolean,
+    QgsProcessingParameterEnum, QgsProcessingParameterExtent,
+    QgsProcessingParameterFeatureSource, QgsProcessingParameterFile,
+    QgsProcessingParameterFolderDestination, QgsProcessingParameterNumber,
+    QgsProcessingParameterRasterLayer, QgsProcessingParameterString,
+    QgsVectorFileWriter,
 )
 
+from ..core import batch, pipeline
 from ..core import rinkyo_core as rc
-from ..core.categories import apply_default_colors
-from ..core import rinkyo_raster as rr
 
 INPUT = "INPUT"
+INPUT_MODE = "INPUT_MODE"
+INPUT_FOLDER = "INPUT_FOLDER"
+RECURSIVE = "RECURSIVE"
+PATTERN = "PATTERN"
+SHARED_SIGNATURE = "SHARED_SIGNATURE"
+KEEP_TREE = "KEEP_TREE"
 CLASSES = "CLASSES"
 SAMPLES = "SAMPLES"
 MIN_SIZE = "MIN_SIZE"
@@ -35,12 +42,37 @@ LIKELIHOOD = "LIKELIHOOD"
 EXTENT = "EXTENT"
 MASK = "MASK"
 OUTPUT = "OUTPUT"
+CLASSIFIED_COUNT = "CLASSIFIED_COUNT"
+
+# INPUT_MODE の選択肢（並び順 = 値）
+MODE_VALUES = [pipeline.MODE_SINGLE, pipeline.MODE_MOSAIC, pipeline.MODE_EACH]
 
 
 class UnsupervisedClassifyAlgorithm(QgsProcessingAlgorithm):
     def initAlgorithm(self, config=None):
+        self.addParameter(QgsProcessingParameterEnum(
+            INPUT_MODE, self.tr("入力モード"),
+            options=[self.tr("単一ラスタ"),
+                     self.tr("フォルダ（モザイクして 1 回分類）"),
+                     self.tr("フォルダ（ファイルごとに分類）")],
+            defaultValue=0))
         self.addParameter(QgsProcessingParameterRasterLayer(
-            INPUT, self.tr("入力画像（Blue/Green/Red/NIR/NDVI）")))
+            INPUT, self.tr("入力画像（単一ラスタ・Blue/Green/Red/NIR/NDVI）"),
+            optional=True))
+        self.addParameter(QgsProcessingParameterFile(
+            INPUT_FOLDER, self.tr("入力フォルダ（フォルダモード）"),
+            behavior=QgsProcessingParameterFile.Folder, optional=True))
+        self.addParameter(QgsProcessingParameterBoolean(
+            RECURSIVE, self.tr("サブフォルダも検索する"), True))
+        self.addParameter(QgsProcessingParameterString(
+            PATTERN, self.tr("ファイル名パターン（; 区切り）"),
+            batch.DEFAULT_PATTERNS))
+        self.addParameter(QgsProcessingParameterBoolean(
+            SHARED_SIGNATURE,
+            self.tr("ファイルごと: 全ファイル共通のクラス定義にする"), True))
+        self.addParameter(QgsProcessingParameterBoolean(
+            KEEP_TREE,
+            self.tr("ファイルごと: 入力のフォルダ構成を出力先に再現する"), True))
         self.addParameter(QgsProcessingParameterNumber(
             CLASSES, self.tr("初期クラス数"),
             QgsProcessingParameterNumber.Integer, 50, False, 2, 255))
@@ -71,35 +103,66 @@ class UnsupervisedClassifyAlgorithm(QgsProcessingAlgorithm):
             [QgsProcessing.TypeVectorPolygon], optional=True))
         self.addParameter(QgsProcessingParameterFolderDestination(
             OUTPUT, self.tr("出力フォルダ")))
+        self.addOutput(QgsProcessingOutputNumber(
+            CLASSIFIED_COUNT, self.tr("分類したファイル数")))
 
     def processAlgorithm(self, parameters, context, feedback):
-        layer = self.parameterAsRasterLayer(parameters, INPUT, context)
-        if layer is None or layer.providerType() != "gdal":
-            raise QgsProcessingException(
-                self.tr("GDAL で読めるラスタを指定してください。"))
-        src = layer.source().split("|")[0]
+        mode = MODE_VALUES[self.parameterAsEnum(parameters, INPUT_MODE, context)]
         out_dir = self.parameterAsString(parameters, OUTPUT, context)
-        base = self.parameterAsString(parameters, BASENAME, context) or "rinkyo"
+        base = self.parameterAsString(parameters, BASENAME, context)
+        if mode != pipeline.MODE_EACH:
+            base = base or "rinkyo"
         os.makedirs(out_dir, exist_ok=True)
 
-        def progress(pct, msg):
-            feedback.setProgress(pct)
-            feedback.setProgressText(msg)
+        # --- 入力 ---------------------------------------------------------
+        root = ""
+        if mode == pipeline.MODE_SINGLE:
+            layer = self.parameterAsRasterLayer(parameters, INPUT, context)
+            if layer is None or layer.providerType() != "gdal":
+                raise QgsProcessingException(
+                    self.tr("GDAL で読めるラスタを指定してください。"))
+            inputs = [layer.source().split("|")[0]]
+            input_crs = layer.crs()
+        else:
+            root = self.parameterAsFile(parameters, INPUT_FOLDER, context)
+            if not root or not os.path.isdir(root):
+                raise QgsProcessingException(
+                    self.tr("入力フォルダを指定してください。"))
+            try:
+                inputs = batch.find_rasters(
+                    root,
+                    batch.parse_patterns(self.parameterAsString(
+                        parameters, PATTERN, context)),
+                    recursive=self.parameterAsBool(
+                        parameters, RECURSIVE, context),
+                    exclude_dirs=[out_dir])
+            except ValueError as exc:
+                raise QgsProcessingException(str(exc)) from exc
+            if not inputs:
+                raise QgsProcessingException(
+                    self.tr("フォルダ内にラスタが見つかりません: %s") % root)
+            feedback.pushInfo(self.tr("%d 件のラスタが見つかりました。")
+                              % len(inputs))
+            first = next((i for i in map(batch.raster_info, inputs)
+                          if i.ok), None)
+            if first is None:
+                raise QgsProcessingException(
+                    self.tr("GDAL で読めるラスタがありません。"))
+            input_crs = QgsCoordinateReferenceSystem.fromWkt(first.wkt)
 
         # --- 処理範囲を絞る（VRT など巨大な入力向け） ----------------------
+        clip_extent = None
         if not self.parameterAsExtent(parameters, EXTENT, context).isEmpty():
             extent = self.parameterAsExtent(
-                parameters, EXTENT, context, layer.crs())
-            bbox_path = os.path.join(out_dir, base + "_clip_bbox.tif")
-            src = rr.clip_by_extent(
-                src, bbox_path,
-                (extent.xMinimum(), extent.yMinimum(),
-                 extent.xMaximum(), extent.yMaximum()))
-            feedback.pushInfo(self.tr("処理範囲(bbox)で切り出しました。"))
+                parameters, EXTENT, context, input_crs)
+            clip_extent = (extent.xMinimum(), extent.yMinimum(),
+                           extent.xMaximum(), extent.yMaximum())
 
+        mask_path = None
         mask_source = self.parameterAsSource(parameters, MASK, context)
         if mask_source is not None and mask_source.featureCount():
-            mask_path = os.path.join(out_dir, base + "_clip_mask.gpkg")
+            mask_path = os.path.join(out_dir, (base or "rinkyo")
+                                     + "_clip_mask.gpkg")
             options = QgsVectorFileWriter.SaveVectorOptions()
             options.driverName = "GPKG"
             err = QgsVectorFileWriter.writeAsVectorFormatV3(
@@ -109,61 +172,57 @@ class UnsupervisedClassifyAlgorithm(QgsProcessingAlgorithm):
             if code != QgsVectorFileWriter.NoError:
                 raise QgsProcessingException(
                     self.tr("切り抜き用ポリゴンを書き出せません: %s") % (err,))
-            clip_path = os.path.join(out_dir, base + "_clip.tif")
-            src = rr.clip_by_mask(src, mask_path, clip_path)
-            feedback.pushInfo(self.tr("指定ポリゴンで切り抜きました。"))
 
+        signature = None
         sig_in = self.parameterAsFile(parameters, SIGNATURE_IN, context)
         if sig_in:
             with open(sig_in, encoding="utf-8") as fh:
                 signature = rc.Signature.from_json(fh.read())
-            feedback.pushInfo("既存シグネチャを適用します（クラス数 %d）"
-                              % signature.n_classes)
-        else:
-            samples, names = rr.sample_raster(
-                src,
-                max_samples=self.parameterAsInt(parameters, SAMPLES, context),
-                progress=progress)
-            feedback.pushInfo("標本 %d 画素 / %d バンド"
-                              % (samples.shape[0], samples.shape[1]))
-            result = rc.cluster(
-                samples,
-                n_classes=self.parameterAsInt(parameters, CLASSES, context),
-                min_class_size=self.parameterAsInt(
-                    parameters, MIN_SIZE, context),
-                min_separation=self.parameterAsDouble(
-                    parameters, SEPARATION, context),
-                max_iterations=self.parameterAsInt(
-                    parameters, ITERATIONS, context),
-                band_names=names,
-                progress=progress)
-            signature = result.signature
-            signature.title = base
-            signature.labels = rc.suggest_labels(signature)
-            feedback.pushInfo(
-                "反復 %d 回 / 収束 %.1f%% / クラス数 %d"
-                % (result.n_iterations, result.convergence,
-                   signature.n_classes))
-            if not result.converged:
-                feedback.pushWarning(
-                    "収束しきっていません。反復回数を増やしてください。")
 
-        # GUI を通らない実行経路なので、ここで色を確定させておく
-        apply_default_colors(signature)
+        opts = pipeline.Options(
+            mode=mode,
+            inputs=inputs,
+            input_root=root,
+            out_dir=out_dir,
+            basename=base,
+            shared_signature=self.parameterAsBool(
+                parameters, SHARED_SIGNATURE, context),
+            keep_tree=self.parameterAsBool(parameters, KEEP_TREE, context),
+            n_classes=self.parameterAsInt(parameters, CLASSES, context),
+            max_samples=self.parameterAsInt(parameters, SAMPLES, context),
+            min_class_size=self.parameterAsInt(parameters, MIN_SIZE, context),
+            min_separation=self.parameterAsDouble(
+                parameters, SEPARATION, context),
+            max_iterations=self.parameterAsInt(
+                parameters, ITERATIONS, context),
+            write_likelihood=self.parameterAsBool(
+                parameters, LIKELIHOOD, context),
+            signature=signature,
+            clip_extent=clip_extent,
+            clip_mask_path=mask_path,
+        )
 
-        sig_path = os.path.join(out_dir, base + "_signature.json")
-        with open(sig_path, "w", encoding="utf-8") as fh:
-            fh.write(signature.to_json())
+        def progress(pct, msg):
+            feedback.setProgress(pct)
+            feedback.setProgressText(msg)
 
-        out_path = os.path.join(out_dir, base + "_class.tif")
-        lik_path = (os.path.join(out_dir, base + "_loglik.tif")
-                    if self.parameterAsBool(parameters, LIKELIHOOD, context)
-                    else None)
-        rr.classify_raster(src, signature, out_path,
-                           likelihood_path=lik_path,
-                           progress=progress,
-                           is_canceled=feedback.isCanceled)
-        return {OUTPUT: out_dir}
+        def log(msg):
+            if msg.startswith(("除外", "スキップ", "失敗", "収束しきって")):
+                feedback.pushWarning(msg)
+            else:
+                feedback.pushInfo(msg)
+
+        runner = pipeline.Runner(opts, progress=progress,
+                                 is_canceled=feedback.isCanceled, log=log)
+        try:
+            outcome = runner.run()
+        except pipeline.Canceled:
+            return {OUTPUT: out_dir, CLASSIFIED_COUNT: 0}
+        except (RuntimeError, OSError, ValueError, MemoryError) as exc:
+            if feedback.isCanceled():
+                return {OUTPUT: out_dir, CLASSIFIED_COUNT: 0}
+            raise QgsProcessingException(str(exc)) from exc
+        return {OUTPUT: out_dir, CLASSIFIED_COUNT: len(outcome.results)}
 
     # -- 定型 --------------------------------------------------------------
     def name(self):
@@ -186,7 +245,17 @@ class UnsupervisedClassifyAlgorithm(QgsProcessingAlgorithm):
             "当てられるので、クラス番号の意味が揃った経年比較ができます。\n\n"
             "入力が VRT など巨大な場合は、「処理範囲」（キャンバス範囲など）"
             "や「切り抜き用ポリゴン」を指定すると、その範囲だけを"
-            "先に切り出してから処理するので大幅に高速化できます。")
+            "先に切り出してから処理するので大幅に高速化できます。\n\n"
+            "入力モードを「フォルダ」にすると、入力フォルダ内（サブフォルダを"
+            "含む）のラスタをパターンで探して処理します。\n"
+            "・モザイク: 見つかったファイルを VRT にまとめて 1 回分類します"
+            "（座標参照系とバンド数が揃っている必要があります）。\n"
+            "・ファイルごと: ファイル単位で <接頭辞>_<元の名前>_class.tif を"
+            "出力します。「共通のクラス定義」を有効にすると、全ファイルから"
+            "標本を集めて 1 つのシグネチャで分類するので、クラス番号の意味が"
+            "揃います。\n"
+            "出力フォルダの中と、*_class.tif などこのプラグインの出力は"
+            "検索対象から除外します。")
 
     def createInstance(self):
         return UnsupervisedClassifyAlgorithm()

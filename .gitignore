@@ -1,3 +1,2 @@
-core/pipeline.py
-core/batch.py
-tests/test_batch.py
+__pycache__/
+*.py[cod]

@@ -13,7 +13,7 @@ import os
 from typing import Optional
 
 from qgis.PyQt import sip
-from qgis.PyQt.QtCore import QCoreApplication
+from qgis.PyQt.QtCore import QCoreApplication, Qt
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction, QMessageBox, QToolBar
 from qgis.core import (
@@ -41,6 +41,8 @@ class RinkyoClassifierPlugin:
         self.toolbar = None
         self.provider = None
         self._task: Optional[ClassifyTask] = None
+        # 開いている意味づけ画面（非モーダルなので参照を持っておく）
+        self._label_dialogs = []
 
     # -- QGIS インタフェース ----------------------------------------------
     def initGui(self):  # noqa: N802  QGIS の規約
@@ -67,6 +69,10 @@ class RinkyoClassifierPlugin:
         self._register_provider()
 
     def unload(self):
+        for dialog in list(self._label_dialogs):
+            if not sip.isdeleted(dialog):
+                dialog.done(0)
+        self._label_dialogs = []
         for action in self.actions:
             self.iface.removePluginRasterMenu(self.tr(MENU_TITLE), action)
             if self.toolbar is not None and not sip.isdeleted(self.toolbar):
@@ -240,11 +246,10 @@ class RinkyoClassifierPlugin:
                                  self.tr("分類結果を読み込めませんでした。"))
             return
 
-        dialog = LabelDialog(task.signature, self.iface.mainWindow())
-        if dialog.exec_():
-            self._rewrite_labels(task, dialog.signature)
+        # 先に地図へ載せておき、意味づけ画面の「適用」で色とラベルを更新する
         apply_signature_style(layer, task.signature)
         QgsProject.instance().addMapLayer(layer)
+        layer_ids = [layer.id()]
 
         if task.likelihood_path and os.path.exists(task.likelihood_path):
             lik = QgsRasterLayer(task.likelihood_path,
@@ -253,6 +258,14 @@ class RinkyoClassifierPlugin:
                 QgsProject.instance().addMapLayer(lik)
 
         self._push_summary(task, os.path.basename(task.result_path))
+        outcome = task.outcome
+
+        def on_apply(signature):
+            error = self._rewrite_labels(outcome, signature)
+            self._restyle(layer_ids, signature)
+            return error
+
+        self._open_label_dialog(task.signature, on_apply)
 
     def _on_batch_done(self, task: ClassifyTask):
         """ファイルごと処理の完了。結果はレイヤグループにまとめて追加する。
@@ -261,17 +274,11 @@ class RinkyoClassifierPlugin:
         個別シグネチャの場合は件数が多くなりうるのでダイアログは出さず、
         必要なレイヤだけ「分類結果の意味づけ…」でやり直してもらう。
         """
-        shared = task.outcome.shared_signature
-        if shared is not None and task.results:
-            dialog = LabelDialog(shared, self.iface.mainWindow())
-            if dialog.exec_():
-                self._rewrite_labels(task, dialog.signature)
-
         project = QgsProject.instance()
         title = "%s %s" % (task.basename or self.tr("林況分類"),
                            self.tr("分類結果"))
         group = project.layerTreeRoot().insertGroup(0, title)
-        added = 0
+        layer_ids = []
         for res in task.results:
             name = res.basename + self.tr(" 分類結果")
             layer = QgsRasterLayer(res.result_path, name)
@@ -283,11 +290,55 @@ class RinkyoClassifierPlugin:
             apply_signature_style(layer, res.signature)
             project.addMapLayer(layer, False)
             group.addLayer(layer)
-            added += 1
-        if not added:
+            layer_ids.append(layer.id())
+        if not layer_ids:
             project.layerTreeRoot().removeChildNode(group)
         self._push_summary(
-            task, self.tr("%d 件（%s）") % (added, task.out_dir))
+            task, self.tr("%d 件（%s）") % (len(layer_ids), task.out_dir))
+
+        outcome = task.outcome
+        shared = outcome.shared_signature
+        if shared is not None and outcome.results:
+            def on_apply(signature):
+                error = self._rewrite_labels(outcome, signature)
+                self._restyle(layer_ids, signature)
+                return error
+
+            self._open_label_dialog(shared, on_apply)
+
+    # -- 意味づけ画面 ------------------------------------------------------
+    def _open_label_dialog(self, signature: Signature, on_apply):
+        """意味づけ画面を非モーダルで開く。
+
+        開いたまま地図を拡大・移動して確認し、「適用」で何度でも反映できる。
+        """
+        dialog = LabelDialog(signature, self.iface.mainWindow(),
+                             on_apply=on_apply)
+        dialog.setWindowModality(Qt.NonModal)
+        dialog.setAttribute(Qt.WA_DeleteOnClose, True)
+        self._label_dialogs.append(dialog)
+
+        def forget(_result=None, d=dialog):
+            if d in self._label_dialogs:
+                self._label_dialogs.remove(d)
+
+        dialog.finished.connect(forget)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        return dialog
+
+    def _restyle(self, layer_ids, signature: Signature):
+        """レイヤの色・凡例を更新する。途中で削除されたレイヤは飛ばす。"""
+        project = QgsProject.instance()
+        view = self.iface.layerTreeView()
+        for layer_id in layer_ids:
+            layer = project.mapLayer(layer_id)
+            if layer is None or sip.isdeleted(layer):
+                continue
+            apply_signature_style(layer, signature)
+            if view is not None:
+                view.refreshLayerSymbology(layer_id)
 
     def _push_summary(self, task: ClassifyTask, what: str):
         outcome = task.outcome
@@ -316,26 +367,46 @@ class RinkyoClassifierPlugin:
                 self.tr("林況分類"), self.tr("処理を中止しました。"), level=Qgis.Warning,
                 duration=5)
 
-    def _rewrite_labels(self, task: ClassifyTask, signature: Signature):
-        """意味づけの結果をラスタ属性テーブルとシグネチャに書き戻す。"""
-        from osgeo import gdal
-        for res in task.results:
-            try:
-                ds = gdal.Open(res.result_path, gdal.GA_Update)
-                write_rat(ds, signature)
-                ds.FlushCache()
-                ds = None
-            except RuntimeError as exc:
-                QgsMessageLog.logMessage(
-                    self.tr("ラスタ属性テーブルを更新できません: %s") % exc,
-                    LOG_TAG, Qgis.Warning)
+    def _rewrite_labels(self, outcome: "pipeline.Outcome",
+                        signature: Signature) -> Optional[str]:
+        """意味づけの結果をラスタ属性テーブルとシグネチャに書き戻す。
+
+        QgsTask は完了後に破棄されるので、task ではなく結果（outcome）を
+        受け取る。失敗したファイルがあれば内容をまとめて返す（無ければ None）。
+        """
+        errors = []
+        for res in outcome.results:
+            error = self._write_labels(res.result_path, res.signature_path,
+                                       signature)
+            if error:
+                errors.append(error)
             res.signature = signature
-            if res.signature_path:
-                with open(res.signature_path, "w", encoding="utf-8") as fh:
+        if outcome.shared_signature is not None:
+            outcome.shared_signature = signature
+        return "\n".join(errors) or None
+
+    def _write_labels(self, raster_path: str, sig_path: Optional[str],
+                      signature: Signature) -> Optional[str]:
+        from osgeo import gdal
+        error = None
+        try:
+            ds = gdal.Open(raster_path, gdal.GA_Update)
+            write_rat(ds, signature)
+            ds.FlushCache()
+            ds = None
+        except RuntimeError as exc:
+            error = self.tr("ラスタ属性テーブルを更新できません: %s\n%s") % (
+                raster_path, exc)
+            QgsMessageLog.logMessage(error, LOG_TAG, Qgis.Warning)
+        if sig_path:
+            try:
+                with open(sig_path, "w", encoding="utf-8") as fh:
                     fh.write(signature.to_json())
-        if task.outcome is not None and \
-                task.outcome.shared_signature is not None:
-            task.outcome.shared_signature = signature
+            except OSError as exc:
+                msg = self.tr("シグネチャを保存できません: %s") % exc
+                QgsMessageLog.logMessage(msg, LOG_TAG, Qgis.Warning)
+                error = "%s\n%s" % (error, msg) if error else msg
+        return error
 
     # -- 意味づけのやり直し ------------------------------------------------
     def relabel(self):
@@ -357,17 +428,15 @@ class RinkyoClassifierPlugin:
         with open(sig_path, encoding="utf-8") as fh:
             signature = Signature.from_json(fh.read())
 
-        dialog = LabelDialog(signature, self.iface.mainWindow())
-        if not dialog.exec_():
-            return
-        from osgeo import gdal
-        ds = gdal.Open(layer.source(), gdal.GA_Update)
-        write_rat(ds, dialog.signature)
-        ds.FlushCache()
-        ds = None
-        with open(sig_path, "w", encoding="utf-8") as fh:
-            fh.write(dialog.signature.to_json())
-        apply_signature_style(layer, dialog.signature)
+        raster_path = layer.source().split("|")[0]
+        layer_ids = [layer.id()]
+
+        def on_apply(sig):
+            error = self._write_labels(raster_path, sig_path, sig)
+            self._restyle(layer_ids, sig)
+            return error
+
+        self._open_label_dialog(signature, on_apply)
 
     # -- 小班集計 ----------------------------------------------------------
     def zonal(self):

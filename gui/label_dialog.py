@@ -11,14 +11,15 @@ License: GPL v2
 
 from __future__ import annotations
 
-from typing import List
+import copy
+from typing import Callable, List, Optional
 
 from qgis.PyQt.QtCore import QPointF, QRectF, Qt, pyqtSignal
 from qgis.PyQt.QtGui import QColor, QPainter, QPen
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView, QColorDialog, QComboBox, QDialog, QDialogButtonBox,
-    QHBoxLayout, QHeaderView, QLabel, QPushButton, QSplitter, QTableWidget,
-    QTableWidgetItem, QVBoxLayout, QWidget,
+    QHBoxLayout, QHeaderView, QLabel, QMessageBox, QPushButton, QSplitter,
+    QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from ..core.categories import (
@@ -113,25 +114,45 @@ class ScatterWidget(QWidget):
             self.classClicked.emit(best)
 
 
-class LabelDialog(QDialog):
-    """クラスごとにカテゴリ名と色を決める。"""
+# 適用処理。成功なら None、失敗ならエラーメッセージを返す。
+ApplyCallback = Callable[[Signature], Optional[str]]
 
-    def __init__(self, signature: Signature, parent=None):
+
+class LabelDialog(QDialog):
+    """クラスごとにカテゴリ名と色を決める。
+
+    on_apply を渡すと「適用」ボタンが出て、画面を閉じずに変更を
+    地図（レイヤのスタイル・ラスタ属性テーブル・シグネチャ）へ反映できる。
+    OK は「適用して閉じる」、キャンセルは「最後に適用した状態のまま閉じる」。
+
+    編集は受け取ったシグネチャのコピーに対して行うので、適用するまで
+    呼び出し側のシグネチャは変わらない。
+    """
+
+    def __init__(self, signature: Signature, parent=None,
+                 on_apply: Optional[ApplyCallback] = None):
         super().__init__(parent)
         self.setWindowTitle(self.tr("分類結果の意味づけ"))
-        self.resize(880, 560)
+        self.resize(880, 580)
+        self._on_apply = on_apply
+        # 作業用のコピー。self.signature は最後に適用（または OK）した内容。
         self.signature = signature
+        self._work = copy.deepcopy(signature)
+        work = self._work
 
-        self._idx = self._band_indices(signature)
-        if not any(signature.labels):
-            signature.labels = suggest_labels(
-                signature,
+        self._idx = self._band_indices(work)
+        if not any(work.labels):
+            work.labels = suggest_labels(
+                work,
                 idx_blue=self._idx["blue"], idx_green=self._idx["green"],
                 idx_red=self._idx["red"], idx_nir=self._idx["nir"],
                 idx_ndvi=self._idx["ndvi"])
-        apply_default_colors(signature)
+        apply_default_colors(work)
+        # 自動ラベルや既定色で埋めた分も「未適用の変更」として扱う
+        self._dirty = (list(work.labels) != list(signature.labels)
+                       or list(work.colors) != list(signature.colors))
 
-        self.table = QTableWidget(signature.n_classes, 5, self)
+        self.table = QTableWidget(work.n_classes, 5, self)
         self.table.setHorizontalHeaderLabels(
             [self.tr("値"), self.tr("画素数"), "Red", "NIR", self.tr("カテゴリ")])
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -162,28 +183,92 @@ class LabelDialog(QDialog):
         splitter.addWidget(self.table)
         splitter.setStretchFactor(1, 1)
 
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.Ok | QDialogButtonBox.Cancel, Qt.Horizontal, self)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
+        flags = QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+        if on_apply is not None:
+            flags |= QDialogButtonBox.Apply
+        self.buttons = QDialogButtonBox(flags, Qt.Horizontal, self)
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        self.apply_button = self.buttons.button(QDialogButtonBox.Apply)
+        if self.apply_button is not None:
+            self.apply_button.setText(self.tr("適用"))
+            self.apply_button.setToolTip(self.tr(
+                "画面を閉じずに、地図のレイヤへ色とラベルを反映します。"))
+            self.apply_button.clicked.connect(self.apply)
+        self.status = QLabel(self)
 
         root = QVBoxLayout(self)
         root.addWidget(splitter, 1)
         bottom = QHBoxLayout()
-        bottom.addStretch(1)
-        bottom.addWidget(buttons)
+        bottom.addWidget(self.status, 1)
+        bottom.addWidget(self.buttons)
         root.addLayout(bottom)
 
         self.scatter.classClicked.connect(self._select_row)
         self.table.currentCellChanged.connect(
             lambda r, c, pr, pc: self.scatter.set_current(r))
         self.color_button.clicked.connect(self._pick_color)
-        if signature.n_classes:
+        if work.n_classes:
             self._select_row(0)
+        self._update_status()
+
+    # -- 適用・確定・取消 --------------------------------------------------
+    def is_dirty(self) -> bool:
+        return self._dirty
+
+    def apply(self) -> bool:
+        """作業中の内容を反映する。失敗したら False（画面は開いたまま）。"""
+        snapshot = copy.deepcopy(self._work)
+        if self._on_apply is not None:
+            try:
+                error = self._on_apply(snapshot)
+            except Exception as exc:  # noqa: BLE001  画面を落とさない
+                error = "%s: %s" % (type(exc).__name__, exc)
+            if error:
+                QMessageBox.warning(self, self.tr("適用できませんでした"),
+                                    error)
+                return False
+        self.signature = snapshot
+        self._dirty = False
+        self._update_status(applied=self._on_apply is not None)
+        return True
+
+    def accept(self) -> None:  # noqa: D401  OK ＝ 適用して閉じる
+        if self._dirty and not self.apply():
+            return
+        super().accept()
+
+    def reject(self) -> None:
+        if self._dirty:
+            answer = QMessageBox.question(
+                self, self.tr("確認"),
+                self.tr("適用していない変更があります。破棄して閉じますか？"),
+                QMessageBox.Discard | QMessageBox.Cancel,
+                QMessageBox.Cancel)
+            if answer != QMessageBox.Discard:
+                return
+        super().reject()
+
+    def _mark_dirty(self) -> None:
+        self._dirty = True
+        self._update_status()
+
+    def _update_status(self, applied: bool = False) -> None:
+        if self.apply_button is not None:
+            self.apply_button.setEnabled(self._dirty)
+        if self._dirty:
+            self.status.setText(self.tr("未適用の変更があります"))
+            self.status.setStyleSheet("color: #b36b00;")
+        elif applied:
+            self.status.setText(self.tr("地図に反映しました"))
+            self.status.setStyleSheet("color: #2e7d32;")
+        else:
+            self.status.setText("")
+            self.status.setStyleSheet("")
 
     # -- 構築 --------------------------------------------------------------
     def _build_rows(self) -> None:
-        sig = self.signature
+        sig = self._work
         for i in range(sig.n_classes):
             self._set_readonly(i, 0, str(i + 1))
             self._set_readonly(i, 1, "{:,}".format(int(sig.counts[i])))
@@ -208,13 +293,15 @@ class LabelDialog(QDialog):
 
     # -- 操作 --------------------------------------------------------------
     def _on_label_changed(self, row: int, text: str) -> None:
-        self.signature.labels[row] = text
+        work = self._work
+        work.labels[row] = text
         # カテゴリを変えたら色も追従させる（手で選んだ色は上書きしない）
         if text in COLOR_BY_NAME:
-            self.signature.colors[row] = COLOR_BY_NAME[text]
-        elif not self.signature.colors[row]:
-            self.signature.colors[row] = color_for(text, row)
+            work.colors[row] = COLOR_BY_NAME[text]
+        elif not work.colors[row]:
+            work.colors[row] = color_for(text, row)
         self._refresh_scatter()
+        self._mark_dirty()
 
     def _select_row(self, index: int) -> None:
         self.table.selectRow(index)
@@ -224,14 +311,15 @@ class LabelDialog(QDialog):
         row = self.table.currentRow()
         if row < 0:
             return
-        initial = QColor(self.signature.colors[row] or "#cccccc")
+        initial = QColor(self._work.colors[row] or "#cccccc")
         color = QColorDialog.getColor(initial, self, self.tr("クラスの色"))
-        if color.isValid():
-            self.signature.colors[row] = color.name()
+        if color.isValid() and color.name() != self._work.colors[row]:
+            self._work.colors[row] = color.name()
             self._refresh_scatter()
+            self._mark_dirty()
 
     def _refresh_scatter(self) -> None:
-        sig = self.signature
+        sig = self._work
         self.scatter.set_data(
             sig.means[:, self._idx["red"]],
             sig.means[:, self._idx["nir"]],

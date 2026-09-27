@@ -17,6 +17,7 @@ from osgeo import gdal, osr
 
 from .categories import color_for
 from .rinkyo_core import Signature, classify_array, prepare_signature
+from .tif_labels import embed_labels
 
 gdal.UseExceptions()
 
@@ -228,7 +229,8 @@ def classify_raster(src_path: str, sig: Signature, out_path: str,
 # ---------------------------------------------------------------------------
 def write_rat(dataset, sig: Signature, labels: Optional[List[str]] = None,
               colors: Optional[List[str]] = None) -> None:
-    """GDAL のラスタ属性テーブルとカラーテーブルを書き込む。
+    """GDAL のラスタ属性テーブルとカラーテーブルを書き込み、
+    クラス名とシグネチャを TIF 本体のメタデータにも埋め込む。
 
     QGIS 3.30 以降はこの RAT をそのまま読んで凡例に反映してくれるので、
     「シンボロジで50クラスに手作業で色とラベルを入れる」工程が消える。
@@ -270,8 +272,31 @@ def write_rat(dataset, sig: Signature, labels: Optional[List[str]] = None,
 
     band = dataset.GetRasterBand(1)
     band.SetDefaultRAT(rat)
-    band.SetRasterColorTable(ct)
-    band.SetRasterColorInterpretation(gdal.GCI_PaletteIndex)
+    # GeoTIFF はタグを書き直すたびにファイル末尾へ追記するので、
+    # 色が変わっていなければカラーマップは書き直さない
+    if not _same_color_table(band.GetRasterColorTable(), ct):
+        band.SetRasterColorTable(ct)
+    if band.GetRasterColorInterpretation() != gdal.GCI_PaletteIndex:
+        band.SetRasterColorInterpretation(gdal.GCI_PaletteIndex)
+    # RAT は GeoTIFF では .aux.xml 側に入るので、クラス名とシグネチャは
+    # TIF 本体にも埋め込んでおく（TIF 単体で意味づけを持ち運べるように）
+    embed_labels(dataset, sig, labels, colors)
+
+
+def _same_color_table(a, b) -> bool:
+    """カラーテーブルの内容が同じか（a が無ければ False）。
+
+    GeoTIFF のカラーマップは 256 色ぶん保存されるので、b に無い色は
+    (0,0,0,*) として比べる。
+    """
+    if a is None:
+        return False
+    for i in range(max(a.GetCount(), b.GetCount())):
+        ca = a.GetColorEntry(i)[:3] if i < a.GetCount() else (0, 0, 0)
+        cb = b.GetColorEntry(i)[:3] if i < b.GetCount() else (0, 0, 0)
+        if ca != cb:
+            return False
+    return True
 
 
 def _hex_to_rgb(text: str):

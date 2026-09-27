@@ -22,6 +22,7 @@ import numpy as np
 from osgeo import gdal, ogr
 
 from .categories import DEFAULT_CATEGORIES
+from .tif_labels import read_embedded_labels
 
 gdal.UseExceptions()
 ogr.UseExceptions()
@@ -60,10 +61,13 @@ def zonal_class_counts(
     rat = band.GetDefaultRAT()
     labels = _labels_from_rat(rat)
 
-    # ラベル編集後の正本は分類ラスタと同名系列の signature JSON。
-    # GeoTIFF のRATは環境・ドライバによって更新後も "class 1" 等のまま
-    # 読み出されることがあるため、隣接JSONがあればそのlabelsを優先する。
-    signature_labels = _labels_from_signature(class_raster)
+    # GeoTIFF のRATは .aux.xml 側にあり、更新後も "class 1" 等のまま
+    # 読み出されることがある。TIF 本体に埋め込んだ意味づけ（0.3.0 以降）、
+    # 隣接する signature JSON、RAT の順に優先する。
+    embedded = read_embedded_labels(ras)
+    signature_labels = ([t or "class %d" % i
+                         for i, t in enumerate(embedded[0], 1)]
+                        if embedded else _labels_from_signature(class_raster))
     if signature_labels:
         labels = ["未分類"] + signature_labels
 
@@ -182,7 +186,7 @@ def to_records(result: Dict[str, object],
             rec["%s_ha" % name] = float(label_count * area / 10000.0)
             ratio = label_count / denom[i] * 100.0
             rec["%s_率" % name] = (None if np.isnan(ratio)
-                                   else round(float(ratio), 2))
+                                  else round(float(ratio), 2))
         records.append(rec)
     return records
 

@@ -4,7 +4,7 @@ qgisMinimumVersion=3.28
 description=Unsupervised classification of Sentinel-2 imagery for forest condition mapping, without GRASS GIS.
 description[ja]=衛星画像の教師なし分類による林況把握。GRASS GIS に依存しません。
 about=Implements the workflow of "Forest condition mapping using satellite imagery" (Hokkaido Research Organization, Forestry Research Institute, 2025) as a single plugin. Clustering and maximum likelihood classification are reimplemented in numpy, so no GRASS GIS installation or external process is required. Includes an interactive class labelling dialog with a Red-NIR scatter plot, raster attribute table output, signature reuse across years, per-subcompartment aggregation, and batch input from a folder (recursive search) as a mosaic or file by file.
-version=0.2.3
+version=0.2.4
 author=Hokkaido IT Team
 email=CHANGE_ME@example.com
 
@@ -20,7 +20,9 @@ hasProcessingProvider=yes
 
 tags=raster,classification,remote sensing,forestry,sentinel,unsupervised,landcover
 
-changelog=0.2.3
+changelog=0.2.4
+    - Added: 意味づけ画面で Ctrl / Shift クリックにより複数クラスを選択し、選択中の行のカテゴリ（プルダウン）や色を変更すると、選択中のクラスすべてにまとめて反映されるようにした。選択中のクラス数と番号を画面に表示する。
+    0.2.3
     - Added: 意味づけ画面で選択中のクラスを、地図上で黄色くハイライト表示する機能。Ctrl / Shift で複数クラスをまとめて表示でき、「ほかのクラスを薄くする」も選べる。表示を差し替えるだけでファイルは書き換えず、画面を閉じると最後に適用した色に戻る。散布図でも Ctrl / Shift クリックで選択に追加・解除できる。
     0.2.2
     - Added: 意味づけ画面に「適用」ボタンを追加。画面を閉じずに、レイヤの色・凡例、ラスタ属性テーブル、シグネチャへ変更を反映できる。OK は「適用して閉じる」、キャンセルは未適用の変更を破棄して閉じる（未適用の変更があれば確認する）。

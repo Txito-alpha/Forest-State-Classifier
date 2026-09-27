@@ -157,6 +157,7 @@ class LabelDialog(QDialog):
         self._on_apply = on_apply
         self._on_highlight = on_highlight
         self._highlighted: List[int] = []
+        self._prev_selection: List[int] = []
         # 作業用のコピー。self.signature は最後に適用（または OK）した内容。
         self.signature = signature
         self._work = copy.deepcopy(signature)
@@ -188,8 +189,14 @@ class LabelDialog(QDialog):
         self.color_button = QPushButton(self.tr("選択中のクラスの色を変更…"), self)
         self.hint = QLabel(self.tr(
             "散布図の点をクリックすると一覧が連動します。"
-            "左下ほど常緑針葉樹林、右上ほど落葉広葉樹林・草地になります。"), self)
+            "左下ほど常緑針葉樹林、右上ほど落葉広葉樹林・草地になります。\n"
+            "Ctrl / Shift を押しながら一覧（値・画素数などの列）や散布図を"
+            "クリックすると複数選択でき、選択中の行のカテゴリや色を変えると"
+            "まとめて変更されます。"), self)
         self.hint.setWordWrap(True)
+        self.selection_info = QLabel(self)
+        self.selection_info.setWordWrap(True)
+        self.selection_info.setStyleSheet("color: #1f5fa8;")
 
         self.highlight_check = QCheckBox(
             self.tr("選択中のクラスを地図上で黄色く表示"), self)
@@ -227,6 +234,7 @@ class LabelDialog(QDialog):
         lv.setContentsMargins(0, 0, 0, 0)
         lv.addWidget(self.scatter, 1)
         lv.addWidget(self.hint)
+        lv.addWidget(self.selection_info)
         lv.addLayout(highlight_row)
         lv.addWidget(self.color_button)
 
@@ -314,8 +322,57 @@ class LabelDialog(QDialog):
         return sorted({r.row() for r in rows})
 
     def _on_selection_changed(self) -> None:
-        self.scatter.set_selected(self.selected_classes())
+        selected = self.selected_classes()
+        # 一覧のプルダウンをクリックすると、Qt はその行だけの選択に
+        # 切り替えてしまう。複数選択中にその中の行のプルダウンを触った
+        # だけなら、直前の複数選択に戻す（まとめて変更できるように）。
+        prev = self._prev_selection
+        if (len(selected) == 1 and len(prev) > 1 and selected[0] in prev
+                and self._combo_has_focus(selected[0])):
+            self._restore_selection(prev, current=selected[0])
+            return
+        self._prev_selection = selected
+        self.scatter.set_selected(selected)
+        if len(selected) > 1:
+            self.selection_info.setText(self.tr(
+                "%d クラスを選択中（%s）: 選択中の行のカテゴリや色を変えると、"
+                "すべてにまとめて反映されます。")
+                % (len(selected), ", ".join(str(i + 1) for i in selected)))
+        else:
+            self.selection_info.setText("")
+        self.color_button.setText(
+            self.tr("選択中の %d クラスの色を変更…") % len(selected)
+            if len(selected) > 1 else self.tr("選択中のクラスの色を変更…"))
         self._schedule_highlight()
+
+    def _combo_has_focus(self, row: int) -> bool:
+        combo = self.table.cellWidget(row, 4)
+        focus = QApplication.focusWidget()
+        while focus is not None:
+            if focus is combo:
+                return True
+            focus = focus.parentWidget()
+        return False
+
+    def _restore_selection(self, rows: List[int], current: int) -> None:
+        model = self.table.selectionModel()
+        self.table.blockSignals(True)
+        model.blockSignals(True)
+        try:
+            model.clearSelection()
+            for r in rows:
+                model.select(self.table.model().index(r, 0),
+                             QItemSelectionModel.Select
+                             | QItemSelectionModel.Rows)
+            model.setCurrentIndex(self.table.model().index(current, 0),
+                                  QItemSelectionModel.NoUpdate)
+        finally:
+            model.blockSignals(False)
+            self.table.blockSignals(False)
+        self.table.viewport().update()
+        self._prev_selection = list(rows)
+        self.scatter.set_selected(rows)
+        self.scatter.set_current(current)
 
     def _on_scatter_clicked(self, index: int) -> None:
         mods = QApplication.keyboardModifiers()
@@ -419,14 +476,32 @@ class LabelDialog(QDialog):
         self.table.setItem(row, col, item)
 
     # -- 操作 --------------------------------------------------------------
+    def _target_rows(self, row: int) -> List[int]:
+        """操作の対象になるクラス。
+
+        複数選択中で、操作した行がその選択に含まれていれば選択中の全クラス、
+        そうでなければその行だけ。
+        """
+        selected = self.selected_classes()
+        if row in selected and len(selected) > 1:
+            return selected
+        return [row]
+
     def _on_label_changed(self, row: int, text: str) -> None:
         work = self._work
-        work.labels[row] = text
-        # カテゴリを変えたら色も追従させる（手で選んだ色は上書きしない）
-        if text in COLOR_BY_NAME:
-            work.colors[row] = COLOR_BY_NAME[text]
-        elif not work.colors[row]:
-            work.colors[row] = color_for(text, row)
+        for r in self._target_rows(row):
+            work.labels[r] = text
+            # カテゴリを変えたら色も追従させる（手で選んだ色は上書きしない）
+            if text in COLOR_BY_NAME:
+                work.colors[r] = COLOR_BY_NAME[text]
+            elif not work.colors[r]:
+                work.colors[r] = color_for(text, r)
+            if r != row:
+                combo = self.table.cellWidget(r, 4)
+                if combo is not None and combo.currentText() != text:
+                    combo.blockSignals(True)
+                    combo.setCurrentText(text)
+                    combo.blockSignals(False)
         self._refresh_scatter()
         self._mark_dirty()
         self._schedule_highlight()
@@ -443,10 +518,19 @@ class LabelDialog(QDialog):
         row = self.table.currentRow()
         if row < 0:
             return
+        rows = self._target_rows(row)
         initial = QColor(self._work.colors[row] or "#cccccc")
-        color = QColorDialog.getColor(initial, self, self.tr("クラスの色"))
-        if color.isValid() and color.name() != self._work.colors[row]:
-            self._work.colors[row] = color.name()
+        title = (self.tr("クラスの色（%d クラスまとめて）") % len(rows)
+                 if len(rows) > 1 else self.tr("クラスの色"))
+        color = QColorDialog.getColor(initial, self, title)
+        if not color.isValid():
+            return
+        changed = False
+        for r in rows:
+            if color.name() != self._work.colors[r]:
+                self._work.colors[r] = color.name()
+                changed = True
+        if changed:
             self._refresh_scatter()
             self._mark_dirty()
             self._schedule_highlight()

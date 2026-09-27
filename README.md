@@ -32,6 +32,7 @@ classification are reimplemented in numpy.
 ```
 python3 tests/test_core.py    # numpy only
 python3 tests/test_batch.py   # numpy + GDAL (folder input)
+QT_QPA_PLATFORM=offscreen python3 tests/test_label_dialog.py   # PyQt5 (labelling dialog)
 ```
 
 ## Internationalization / 多言語対応

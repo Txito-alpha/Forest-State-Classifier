@@ -24,7 +24,9 @@ from qgis.core import (
 from .core import pipeline
 from .core.rinkyo_core import Signature
 from .core.rinkyo_raster import write_rat
-from .gui.label_dialog import LabelDialog, apply_signature_style
+from .gui.label_dialog import (
+    LabelDialog, apply_highlight_style, apply_signature_style,
+)
 from .gui.main_dialog import MainDialog
 from .task import ClassifyTask
 
@@ -265,7 +267,7 @@ class RinkyoClassifierPlugin:
             self._restyle(layer_ids, signature)
             return error
 
-        self._open_label_dialog(task.signature, on_apply)
+        self._open_label_dialog(task.signature, on_apply, layer_ids)
 
     def _on_batch_done(self, task: ClassifyTask):
         """ファイルごと処理の完了。結果はレイヤグループにまとめて追加する。
@@ -304,16 +306,20 @@ class RinkyoClassifierPlugin:
                 self._restyle(layer_ids, signature)
                 return error
 
-            self._open_label_dialog(shared, on_apply)
+            self._open_label_dialog(shared, on_apply, layer_ids)
 
     # -- 意味づけ画面 ------------------------------------------------------
-    def _open_label_dialog(self, signature: Signature, on_apply):
+    def _open_label_dialog(self, signature: Signature, on_apply, layer_ids):
         """意味づけ画面を非モーダルで開く。
 
         開いたまま地図を拡大・移動して確認し、「適用」で何度でも反映できる。
+        一覧で選んだクラスは、layer_ids のレイヤ上で黄色くハイライトする。
         """
+        def on_highlight(indices, sig, dim):
+            self._highlight(layer_ids, indices, sig, dim)
+
         dialog = LabelDialog(signature, self.iface.mainWindow(),
-                             on_apply=on_apply)
+                             on_apply=on_apply, on_highlight=on_highlight)
         dialog.setWindowModality(Qt.NonModal)
         dialog.setAttribute(Qt.WA_DeleteOnClose, True)
         self._label_dialogs.append(dialog)
@@ -327,6 +333,21 @@ class RinkyoClassifierPlugin:
         dialog.raise_()
         dialog.activateWindow()
         return dialog
+
+    def _highlight(self, layer_ids, indices, signature: Signature, dim: bool):
+        """選んだクラスを黄色く表示する。indices が空なら通常表示に戻す。
+
+        ファイルは書き換えず、レイヤの表示（レンダラ）だけを差し替える。
+        """
+        if not indices:
+            self._restyle(layer_ids, signature)
+            return
+        project = QgsProject.instance()
+        for layer_id in layer_ids:
+            layer = project.mapLayer(layer_id)
+            if layer is None or sip.isdeleted(layer):
+                continue
+            apply_highlight_style(layer, signature, indices, dim)
 
     def _restyle(self, layer_ids, signature: Signature):
         """レイヤの色・凡例を更新する。途中で削除されたレイヤは飛ばす。"""
@@ -436,7 +457,7 @@ class RinkyoClassifierPlugin:
             self._restyle(layer_ids, sig)
             return error
 
-        self._open_label_dialog(signature, on_apply)
+        self._open_label_dialog(signature, on_apply, layer_ids)
 
     # -- 小班集計 ----------------------------------------------------------
     def zonal(self):

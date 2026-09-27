@@ -14,11 +14,15 @@ from __future__ import annotations
 import copy
 from typing import Callable, List, Optional
 
-from qgis.PyQt.QtCore import QPointF, QRectF, Qt, pyqtSignal
+from qgis.PyQt.QtCore import (
+    QItemSelectionModel, QPointF, QRectF, QSettings, Qt, QTimer, pyqtSignal,
+)
 from qgis.PyQt.QtGui import QColor, QPainter, QPen
 from qgis.PyQt.QtWidgets import (
-    QAbstractItemView, QColorDialog, QComboBox, QDialog, QDialogButtonBox,
-    QHBoxLayout, QHeaderView, QLabel, QMessageBox, QPushButton, QSplitter,
+    QAbstractItemView, QApplication, QCheckBox, QColorDialog, QComboBox,
+    QDialog,
+    QDialogButtonBox, QHBoxLayout, QHeaderView, QLabel, QMessageBox,
+    QPushButton, QSplitter,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -40,6 +44,7 @@ class ScatterWidget(QWidget):
         self._y: List[float] = []
         self._colors: List[QColor] = []
         self._current = -1
+        self._selected: List[int] = []
         self._x_label = "Red"
         self._y_label = "NIR"
 
@@ -53,6 +58,10 @@ class ScatterWidget(QWidget):
 
     def set_current(self, index: int) -> None:
         self._current = index
+        self.update()
+
+    def set_selected(self, indices: List[int]) -> None:
+        self._selected = list(indices)
         self.update()
 
     # -- 座標変換 ----------------------------------------------------------
@@ -91,7 +100,10 @@ class ScatterWidget(QWidget):
             p = self._to_screen(i)
             col = self._colors[i] if i < len(self._colors) else QColor("#999")
             painter.setBrush(col)
-            if i == self._current:
+            if i in self._selected and i != self._current:
+                painter.setPen(QPen(QColor(20, 20, 20), 2))
+                painter.drawEllipse(p, 7, 7)
+            elif i == self._current:
                 painter.setPen(QPen(QColor(20, 20, 20), 2))
                 painter.drawEllipse(p, 8, 8)
             else:
@@ -116,6 +128,13 @@ class ScatterWidget(QWidget):
 
 # 適用処理。成功なら None、失敗ならエラーメッセージを返す。
 ApplyCallback = Callable[[Signature], Optional[str]]
+# ハイライト処理。(クラス番号のリスト(0始まり), シグネチャ, 他を薄くするか)。
+# リストが空なら、渡したシグネチャの通常表示に戻す。
+HighlightCallback = Callable[[List[int], Signature, bool], None]
+
+HIGHLIGHT_COLOR = "#ffff00"
+SETTINGS_KEY = "HokkaidoITTeam/RinkyoClassifier/label_dialog"
+DIM_ALPHA = 45
 
 
 class LabelDialog(QDialog):
@@ -130,11 +149,14 @@ class LabelDialog(QDialog):
     """
 
     def __init__(self, signature: Signature, parent=None,
-                 on_apply: Optional[ApplyCallback] = None):
+                 on_apply: Optional[ApplyCallback] = None,
+                 on_highlight: Optional[HighlightCallback] = None):
         super().__init__(parent)
         self.setWindowTitle(self.tr("分類結果の意味づけ"))
-        self.resize(880, 580)
+        self.resize(880, 600)
         self._on_apply = on_apply
+        self._on_highlight = on_highlight
+        self._highlighted: List[int] = []
         # 作業用のコピー。self.signature は最後に適用（または OK）した内容。
         self.signature = signature
         self._work = copy.deepcopy(signature)
@@ -156,7 +178,8 @@ class LabelDialog(QDialog):
         self.table.setHorizontalHeaderLabels(
             [self.tr("値"), self.tr("画素数"), "Red", "NIR", self.tr("カテゴリ")])
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        # Ctrl / Shift で複数クラスを選んで、まとめてハイライトできる
+        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setSectionResizeMode(
             4, QHeaderView.Stretch)
@@ -168,6 +191,34 @@ class LabelDialog(QDialog):
             "左下ほど常緑針葉樹林、右上ほど落葉広葉樹林・草地になります。"), self)
         self.hint.setWordWrap(True)
 
+        self.highlight_check = QCheckBox(
+            self.tr("選択中のクラスを地図上で黄色く表示"), self)
+        self.highlight_check.setToolTip(self.tr(
+            "一覧や散布図で選んだクラスの画素を、地図上で黄色く塗ります。\n"
+            "Ctrl / Shift を押しながら選ぶと複数クラスをまとめて表示できます。\n"
+            "画面を閉じると元の色に戻ります。"))
+        self.dim_check = QCheckBox(self.tr("ほかのクラスを薄くする"), self)
+        self.dim_check.setChecked(True)
+        highlight_row = QHBoxLayout()
+        highlight_row.setContentsMargins(0, 0, 0, 0)
+        highlight_row.addWidget(self.highlight_check)
+        highlight_row.addWidget(self.dim_check)
+        highlight_row.addStretch(1)
+        enabled = on_highlight is not None
+        self.highlight_check.setVisible(enabled)
+        self.dim_check.setVisible(enabled)
+        settings = QSettings()
+        self.highlight_check.setChecked(enabled and settings.value(
+            SETTINGS_KEY + "/highlight", True, type=bool))
+        self.dim_check.setChecked(settings.value(
+            SETTINGS_KEY + "/highlight_dim", True, type=bool))
+
+        # 矢印キーで次々に選んだときに毎回再描画しないよう、少し待ってから反映
+        self._highlight_timer = QTimer(self)
+        self._highlight_timer.setSingleShot(True)
+        self._highlight_timer.setInterval(150)
+        self._highlight_timer.timeout.connect(self._update_highlight)
+
         self._build_rows()
         self._refresh_scatter()
 
@@ -176,6 +227,7 @@ class LabelDialog(QDialog):
         lv.setContentsMargins(0, 0, 0, 0)
         lv.addWidget(self.scatter, 1)
         lv.addWidget(self.hint)
+        lv.addLayout(highlight_row)
         lv.addWidget(self.color_button)
 
         splitter = QSplitter(Qt.Horizontal, self)
@@ -204,10 +256,15 @@ class LabelDialog(QDialog):
         bottom.addWidget(self.buttons)
         root.addLayout(bottom)
 
-        self.scatter.classClicked.connect(self._select_row)
+        self.scatter.classClicked.connect(self._on_scatter_clicked)
         self.table.currentCellChanged.connect(
             lambda r, c, pr, pc: self.scatter.set_current(r))
+        self.table.itemSelectionChanged.connect(self._on_selection_changed)
         self.color_button.clicked.connect(self._pick_color)
+        self.highlight_check.toggled.connect(self._on_highlight_toggled)
+        self.dim_check.toggled.connect(self._on_dim_toggled)
+        # どの閉じ方でも（OK・キャンセル・×・アンロード）元の表示に戻す
+        self.finished.connect(lambda _r: self._clear_highlight())
         if work.n_classes:
             self._select_row(0)
         self._update_status()
@@ -231,6 +288,8 @@ class LabelDialog(QDialog):
         self.signature = snapshot
         self._dirty = False
         self._update_status(applied=self._on_apply is not None)
+        if self._highlighted:
+            self._update_highlight()
         return True
 
     def accept(self) -> None:  # noqa: D401  OK ＝ 適用して閉じる
@@ -248,6 +307,74 @@ class LabelDialog(QDialog):
             if answer != QMessageBox.Discard:
                 return
         super().reject()
+
+    # -- ハイライト --------------------------------------------------------
+    def selected_classes(self) -> List[int]:
+        rows = self.table.selectionModel().selectedRows()
+        return sorted({r.row() for r in rows})
+
+    def _on_selection_changed(self) -> None:
+        self.scatter.set_selected(self.selected_classes())
+        self._schedule_highlight()
+
+    def _on_scatter_clicked(self, index: int) -> None:
+        mods = QApplication.keyboardModifiers()
+        if mods & (Qt.ControlModifier | Qt.ShiftModifier):
+            # 散布図でも Ctrl / Shift で選択に追加・解除できる
+            model = self.table.selectionModel()
+            idx = self.table.model().index(index, 0)
+            model.select(idx, QItemSelectionModel.Toggle
+                         | QItemSelectionModel.Rows)
+            self.table.setCurrentCell(index, 0,
+                                      QItemSelectionModel.NoUpdate)
+            self.scatter.set_current(index)
+        else:
+            self._select_row(index)
+
+    def _on_highlight_toggled(self, on: bool) -> None:
+        QSettings().setValue(SETTINGS_KEY + "/highlight", on)
+        self._update_highlight()
+
+    def _on_dim_toggled(self, on: bool) -> None:
+        QSettings().setValue(SETTINGS_KEY + "/highlight_dim", on)
+        self._schedule_highlight()
+
+    def _schedule_highlight(self) -> None:
+        if self._on_highlight is not None and self.highlight_check.isChecked():
+            self._highlight_timer.start()
+
+    def _update_highlight(self) -> None:
+        """選択中のクラスを地図上で黄色く表示する（作業中の色で）。"""
+        if self._on_highlight is None:
+            return
+        self._highlight_timer.stop()
+        indices = (self.selected_classes()
+                   if self.highlight_check.isChecked() else [])
+        if not indices:
+            self._clear_highlight()
+            return
+        self._highlighted = indices
+        try:
+            self._on_highlight(indices, self._work, self.dim_check.isChecked())
+        except Exception:  # noqa: BLE001  表示だけの機能なので画面は落とさない
+            import traceback
+            from qgis.core import Qgis, QgsMessageLog
+            QgsMessageLog.logMessage(traceback.format_exc(),
+                                     "RinkyoClassifier", Qgis.Warning)
+
+    def _clear_highlight(self) -> None:
+        """ハイライトをやめ、最後に適用した色に戻す。"""
+        self._highlight_timer.stop()
+        if self._on_highlight is None or not self._highlighted:
+            return
+        self._highlighted = []
+        try:
+            self._on_highlight([], self.signature, False)
+        except Exception:  # noqa: BLE001
+            import traceback
+            from qgis.core import Qgis, QgsMessageLog
+            QgsMessageLog.logMessage(traceback.format_exc(),
+                                     "RinkyoClassifier", Qgis.Warning)
 
     def _mark_dirty(self) -> None:
         self._dirty = True
@@ -302,9 +429,14 @@ class LabelDialog(QDialog):
             work.colors[row] = color_for(text, row)
         self._refresh_scatter()
         self._mark_dirty()
+        self._schedule_highlight()
 
     def _select_row(self, index: int) -> None:
-        self.table.selectRow(index)
+        """そのクラスだけを選ぶ（複数選択は解除する）。"""
+        idx = self.table.model().index(index, 0)
+        self.table.selectionModel().setCurrentIndex(
+            idx, QItemSelectionModel.ClearAndSelect | QItemSelectionModel.Rows)
+        self.table.scrollTo(idx)
         self.scatter.set_current(index)
 
     def _pick_color(self) -> None:
@@ -317,6 +449,7 @@ class LabelDialog(QDialog):
             self._work.colors[row] = color.name()
             self._refresh_scatter()
             self._mark_dirty()
+            self._schedule_highlight()
 
     def _refresh_scatter(self) -> None:
         sig = self._work
@@ -360,6 +493,31 @@ class LabelDialog(QDialog):
         if out["ndvi"] is not None and out["ndvi"] >= sig.n_bands:
             out["ndvi"] = None
         return out
+
+
+def apply_highlight_style(layer, signature: Signature,
+                          indices: List[int], dim: bool = True) -> None:
+    """選んだクラスだけ黄色、それ以外は元の色（dim なら半透明）で描く。
+
+    ファイルには何も書かず、レイヤのレンダラだけを差し替える。
+    元に戻すときは apply_signature_style を呼ぶ。
+    """
+    from qgis.core import QgsPalettedRasterRenderer
+
+    chosen = set(indices)
+    classes: List[QgsPalettedRasterRenderer.Class] = []
+    for i in range(signature.n_classes):
+        label = signature.labels[i] or "class %d" % (i + 1)
+        if i in chosen:
+            color = QColor(HIGHLIGHT_COLOR)
+        else:
+            color = QColor(signature.colors[i] or color_for(label, i))
+            if dim:
+                color.setAlpha(DIM_ALPHA)
+        classes.append(QgsPalettedRasterRenderer.Class(i + 1, color, label))
+    renderer = QgsPalettedRasterRenderer(layer.dataProvider(), 1, classes)
+    layer.setRenderer(renderer)
+    layer.triggerRepaint()
 
 
 def apply_signature_style(layer, signature: Signature) -> None:

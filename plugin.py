@@ -267,7 +267,8 @@ class RinkyoClassifierPlugin:
             self._restyle(layer_ids, signature)
             return error
 
-        self._open_label_dialog(task.signature, on_apply, layer_ids)
+        self._open_label_dialog(task.signature, on_apply, layer_ids,
+                                subject=layer.name())
 
     def _on_batch_done(self, task: ClassifyTask):
         """ファイルごと処理の完了。結果はレイヤグループにまとめて追加する。
@@ -306,20 +307,26 @@ class RinkyoClassifierPlugin:
                 self._restyle(layer_ids, signature)
                 return error
 
-            self._open_label_dialog(shared, on_apply, layer_ids)
+            self._open_label_dialog(
+                shared, on_apply, layer_ids,
+                subject=self.tr("%s（%d 件）") % (title, len(layer_ids)))
 
     # -- 意味づけ画面 ------------------------------------------------------
-    def _open_label_dialog(self, signature: Signature, on_apply, layer_ids):
+    def _open_label_dialog(self, signature: Signature, on_apply, layer_ids,
+                          subject: str = ""):
         """意味づけ画面を非モーダルで開く。
 
         開いたまま地図を拡大・移動して確認し、「適用」で何度でも反映できる。
         一覧で選んだクラスは、layer_ids のレイヤ上で黄色くハイライトする。
+        subject には編集対象（レイヤ名やグループ名）を渡す。複数レイヤを
+        同時に編集する場合でも、いま何を編集しているか画面で分かるようにする。
         """
         def on_highlight(indices, sig, dim):
             self._highlight(layer_ids, indices, sig, dim)
 
         dialog = LabelDialog(signature, self.iface.mainWindow(),
-                             on_apply=on_apply, on_highlight=on_highlight)
+                             on_apply=on_apply, on_highlight=on_highlight,
+                             subject=subject)
         dialog.setWindowModality(Qt.NonModal)
         dialog.setAttribute(Qt.WA_DeleteOnClose, True)
         self._label_dialogs.append(dialog)
@@ -457,7 +464,8 @@ class RinkyoClassifierPlugin:
             self._restyle(layer_ids, sig)
             return error
 
-        self._open_label_dialog(signature, on_apply, layer_ids)
+        self._open_label_dialog(signature, on_apply, layer_ids,
+                                subject=layer.name())
 
     # -- 小班集計 ----------------------------------------------------------
     def zonal(self):

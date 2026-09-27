@@ -150,10 +150,13 @@ class LabelDialog(QDialog):
 
     def __init__(self, signature: Signature, parent=None,
                  on_apply: Optional[ApplyCallback] = None,
-                 on_highlight: Optional[HighlightCallback] = None):
+                 on_highlight: Optional[HighlightCallback] = None,
+                 subject: str = ""):
         super().__init__(parent)
-        self.setWindowTitle(self.tr("分類結果の意味づけ"))
+        title = self.tr("分類結果の意味づけ")
+        self.setWindowTitle("%s - %s" % (subject, title) if subject else title)
         self.resize(880, 600)
+        self._subject = subject
         self._on_apply = on_apply
         self._on_highlight = on_highlight
         self._highlighted: List[int] = []
@@ -187,6 +190,14 @@ class LabelDialog(QDialog):
 
         self.scatter = ScatterWidget(self)
         self.color_button = QPushButton(self.tr("選択中のクラスの色を変更…"), self)
+        self.subject_label = QLabel(self)
+        self.subject_label.setStyleSheet("font-weight: bold;")
+        self.subject_label.setWordWrap(True)
+        self.subject_label.setVisible(bool(subject))
+        if subject:
+            self.subject_label.setText(
+                self.tr("編集中: %s") % subject)
+
         self.hint = QLabel(self.tr(
             "散布図の点をクリックすると一覧が連動します。"
             "左下ほど常緑針葉樹林、右上ほど落葉広葉樹林・草地になります。\n"
@@ -258,6 +269,8 @@ class LabelDialog(QDialog):
         self.status = QLabel(self)
 
         root = QVBoxLayout(self)
+        if subject:
+            root.addWidget(self.subject_label)
         root.addWidget(splitter, 1)
         bottom = QHBoxLayout()
         bottom.addWidget(self.status, 1)

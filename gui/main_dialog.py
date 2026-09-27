@@ -15,7 +15,7 @@ from qgis.PyQt.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton,
-    QSpinBox, QStackedWidget, QVBoxLayout, QWidget,
+    QSpinBox, QStackedWidget, QTabWidget, QVBoxLayout, QWidget,
 )
 from qgis.core import (
     QgsCoordinateReferenceSystem, QgsMapLayerProxyModel, QgsProject,
@@ -37,7 +37,7 @@ class MainDialog(QDialog):
         super().__init__(parent)
         self.iface = iface
         self.setWindowTitle(self.tr("衛星画像の教師なし分類"))
-        self.resize(600, 760)
+        self.resize(600, 620)
         self.signature_path: Optional[str] = None
 
         # --- 入力 ---------------------------------------------------------
@@ -292,14 +292,31 @@ class MainDialog(QDialog):
         buttons.accepted.connect(self._on_accept)
         buttons.rejected.connect(self.reject)
 
+        # 縦に長くなりすぎて画面に収まらないディスプレイがあるため、
+        # 入出力（入力画像・処理範囲・出力）とパラメータ（クラスタリング・
+        # 経年比較）でタブを分ける。実行・キャンセルはタブの外に固定する。
+        io_page = QWidget(self)
+        io_layout = QVBoxLayout(io_page)
+        io_layout.setContentsMargins(0, 6, 0, 0)
+        io_layout.addWidget(input_box)
+        io_layout.addWidget(self.extent_box)
+        io_layout.addWidget(out_box)
+        io_layout.addWidget(self.note)
+        io_layout.addStretch(1)
+
+        param_page = QWidget(self)
+        param_layout = QVBoxLayout(param_page)
+        param_layout.setContentsMargins(0, 6, 0, 0)
+        param_layout.addWidget(param_box)
+        param_layout.addWidget(reuse_box)
+        param_layout.addStretch(1)
+
+        self.tabs = QTabWidget(self)
+        self.tabs.addTab(io_page, self.tr("入出力"))
+        self.tabs.addTab(param_page, self.tr("パラメータ"))
+
         root = QVBoxLayout(self)
-        root.addWidget(input_box)
-        root.addWidget(self.extent_box)
-        root.addWidget(param_box)
-        root.addWidget(reuse_box)
-        root.addWidget(out_box)
-        root.addWidget(self.note)
-        root.addStretch(1)
+        root.addWidget(self.tabs, 1)
         root.addWidget(buttons)
 
         self.layer_combo.currentIndexChanged.connect(
@@ -665,6 +682,7 @@ class MainDialog(QDialog):
         s.setValue("shared_signature", self.shared_check.isChecked())
         s.setValue("keep_tree", self.keep_tree_check.isChecked())
         s.setValue("existing", self.existing_combo.currentData())
+        s.setValue("current_tab", self.tabs.currentIndex())
         s.endGroup()
 
     def _restore(self) -> None:
@@ -699,6 +717,7 @@ class MainDialog(QDialog):
         self.keep_tree_check.setChecked(s.value("keep_tree", True, type=bool))
         _select_data(self.existing_combo,
                      s.value("existing", pipeline.EXISTING_SKIP, type=str))
+        self.tabs.setCurrentIndex(s.value("current_tab", 0, type=int))
         s.endGroup()
         if not self.out_dir.text():
             project_path = QgsProject.instance().homePath()

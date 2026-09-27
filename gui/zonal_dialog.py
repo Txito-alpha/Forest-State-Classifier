@@ -116,7 +116,7 @@ class ZonalDialog(QDialog):
             QMessageBox.warning(
                 self, self.tr("確認"),
                 self.tr("ラスタとポリゴンの座標参照系が違います。\n"
-                "先に揃えてから実行してください。\nラスタ: %s\nポリゴン: %s")
+                        "先に揃えてから実行してください。\nラスタ: %s\nポリゴン: %s")
                 % (raster.crs().authid(), polygon.crs().authid()))
             return
 

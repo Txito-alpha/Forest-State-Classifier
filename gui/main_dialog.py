@@ -619,7 +619,7 @@ class MainDialog(QDialog):
             r = self.extent_box.outputExtent()
             if not r.isEmpty():
                 clip_extent = (r.xMinimum(), r.yMinimum(),
-                              r.xMaximum(), r.yMaximum())
+                               r.xMaximum(), r.yMaximum())
         mode = self.pipeline_mode()
         folder = self.is_folder_mode()
         basename = self.basename.text().strip()

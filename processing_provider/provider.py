@@ -15,6 +15,7 @@ import os
 from qgis.PyQt.QtGui import QIcon
 from qgis.core import QgsProcessingProvider
 
+from .alg_apply_labels import ApplyLabelsAlgorithm
 from .alg_classify import UnsupervisedClassifyAlgorithm
 from .alg_zonal import ZonalClassSummaryAlgorithm
 
@@ -23,6 +24,7 @@ class RinkyoProvider(QgsProcessingProvider):
     def loadAlgorithms(self):
         self.addAlgorithm(UnsupervisedClassifyAlgorithm())
         self.addAlgorithm(ZonalClassSummaryAlgorithm())
+        self.addAlgorithm(ApplyLabelsAlgorithm())
 
     def id(self):
         return "rinkyo"

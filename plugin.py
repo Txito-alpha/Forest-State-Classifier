@@ -21,7 +21,7 @@ from qgis.core import (
     QgsMessageLog, QgsProject, QgsRasterLayer, QgsVectorFileWriter,
 )
 
-from .core import pipeline
+from .core import pipeline, tif_labels
 from .core.rinkyo_core import Signature
 from .core.rinkyo_raster import write_rat
 from .gui.label_dialog import (
@@ -263,7 +263,8 @@ class RinkyoClassifierPlugin:
         outcome = task.outcome
 
         def on_apply(signature):
-            error = self._rewrite_labels(outcome, signature)
+            error = self._write_files(
+                layer_ids, lambda: self._rewrite_labels(outcome, signature))
             self._restyle(layer_ids, signature)
             return error
 
@@ -303,7 +304,9 @@ class RinkyoClassifierPlugin:
         shared = outcome.shared_signature
         if shared is not None and outcome.results:
             def on_apply(signature):
-                error = self._rewrite_labels(outcome, signature)
+                error = self._write_files(
+                    layer_ids,
+                    lambda: self._rewrite_labels(outcome, signature))
                 self._restyle(layer_ids, signature)
                 return error
 
@@ -313,7 +316,7 @@ class RinkyoClassifierPlugin:
 
     # -- 意味づけ画面 ------------------------------------------------------
     def _open_label_dialog(self, signature: Signature, on_apply, layer_ids,
-                          subject: str = ""):
+                           subject: str = ""):
         """意味づけ画面を非モーダルで開く。
 
         開いたまま地図を拡大・移動して確認し、「適用」で何度でも反映できる。
@@ -355,6 +358,32 @@ class RinkyoClassifierPlugin:
             if layer is None or sip.isdeleted(layer):
                 continue
             apply_highlight_style(layer, signature, indices, dim)
+
+    def _write_files(self, layer_ids, write):
+        """分類ラスタへの書き込み write() を、レイヤを読み直しながら行う。
+
+        QGIS が開いているラスタは、閉じる際に古い内容の .aux.xml（RAT）を
+        書き戻すことがある。書き込みの前に一度読み直して古い状態を
+        吐き出させ、書き込み後にもう一度読み直して新しい内容を反映する。
+        """
+        self._reload(layer_ids)
+        try:
+            return write()
+        finally:
+            self._reload(layer_ids)
+
+    def _reload(self, layer_ids):
+        project = QgsProject.instance()
+        for layer_id in layer_ids:
+            layer = project.mapLayer(layer_id)
+            if layer is None or sip.isdeleted(layer):
+                continue
+            try:
+                layer.reload()
+            except Exception as exc:  # noqa: BLE001  表示の更新だけなので続行
+                QgsMessageLog.logMessage(
+                    self.tr("レイヤを読み直せませんでした: %s") % exc,
+                    LOG_TAG, Qgis.Warning)
 
     def _restyle(self, layer_ids, signature: Signature):
         """レイヤの色・凡例を更新する。途中で削除されたレイヤは飛ばす。"""
@@ -423,7 +452,7 @@ class RinkyoClassifierPlugin:
             ds.FlushCache()
             ds = None
         except RuntimeError as exc:
-            error = self.tr("ラスタ属性テーブルを更新できません: %s\n%s") % (
+            error = self.tr("分類ラスタ（TIF）に意味づけを書き込めません: %s\n%s") % (
                 raster_path, exc)
             QgsMessageLog.logMessage(error, LOG_TAG, Qgis.Warning)
         if sig_path:
@@ -444,23 +473,25 @@ class RinkyoClassifierPlugin:
                 self.iface.mainWindow(), self.tr("確認"),
                 self.tr("分類結果のラスタレイヤを選んでから実行してください。"))
             return
-        stem = os.path.splitext(layer.source().split("|")[0])[0]
-        if stem.endswith("_class"):
-            stem = stem[:-len("_class")]
-        sig_path = stem + "_signature.json"
-        if not os.path.isfile(sig_path):
+        raster_path = tif_labels.raster_file(layer.source())
+        sig_path = tif_labels.signature_path_for(raster_path)
+        # TIF に埋め込んだ意味づけ（0.3.0 以降）を優先し、
+        # 無ければ隣の _signature.json を使う
+        signature, _origin = tif_labels.load_signature(raster_path)
+        if signature is None:
             QMessageBox.information(
                 self.iface.mainWindow(), self.tr("確認"),
-                self.tr("対応するシグネチャファイルが見つかりません:\n%s") % sig_path)
+                self.tr("この分類ラスタには意味づけの情報がありません。\n"
+                        "TIF への埋め込みも、対応するシグネチャファイルも"
+                        "見つかりません:\n%s") % sig_path)
             return
-        with open(sig_path, encoding="utf-8") as fh:
-            signature = Signature.from_json(fh.read())
 
-        raster_path = layer.source().split("|")[0]
         layer_ids = [layer.id()]
 
         def on_apply(sig):
-            error = self._write_labels(raster_path, sig_path, sig)
+            error = self._write_files(
+                layer_ids,
+                lambda: self._write_labels(raster_path, sig_path, sig))
             self._restyle(layer_ids, sig)
             return error
 

@@ -338,7 +338,8 @@ class LabelDialog(QDialog):
         if self.apply_button is not None:
             self.apply_button.setText(self.tr("適用"))
             self.apply_button.setToolTip(self.tr(
-                "画面を閉じずに、地図のレイヤへ色とラベルを反映します。"))
+                "画面を閉じずに、色とクラス名を地図のレイヤと分類結果の TIF\n"
+                "（カラーマップ・埋め込みメタデータ・属性テーブル）に反映します。"))
             self.apply_button.clicked.connect(self.apply)
         self.status = QLabel(self)
 
@@ -606,7 +607,7 @@ class LabelDialog(QDialog):
             self.status.setText(self.tr("未適用の変更があります"))
             self.status.setStyleSheet("color: #b36b00;")
         elif applied:
-            self.status.setText(self.tr("地図に反映しました"))
+            self.status.setText(self.tr("地図と TIF に反映しました"))
             self.status.setStyleSheet("color: #2e7d32;")
         else:
             self.status.setText("")
@@ -703,7 +704,7 @@ class LabelDialog(QDialog):
     def _refresh_scatter(self) -> None:
         sig = self._work
         target = (self._filter_label
-                 if self.category_filter_check.isChecked() else None)
+                  if self.category_filter_check.isChecked() else None)
         colors = []
         for i, c in enumerate(sig.colors):
             color = QColor(c or "#cccccc")

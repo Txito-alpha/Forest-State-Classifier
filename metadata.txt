@@ -4,7 +4,7 @@ qgisMinimumVersion=3.28
 description=Unsupervised classification of Sentinel-2 imagery for forest condition mapping, without GRASS GIS.
 description[ja]=衛星画像の教師なし分類による林況把握。GRASS GIS に依存しません。
 about=Implements the workflow of "Forest condition mapping using satellite imagery" (Hokkaido Research Organization, Forestry Research Institute, 2025) as a single plugin. Clustering and maximum likelihood classification are reimplemented in numpy, so no GRASS GIS installation or external process is required. Includes an interactive class labelling dialog with a Red-NIR scatter plot, raster attribute table output, signature reuse across years, per-subcompartment aggregation, and batch input from a folder (recursive search) as a mosaic or file by file.
-version=0.2.0
+version=0.2.1
 author=Hokkaido IT Team
 email=CHANGE_ME@example.com
 
@@ -20,7 +20,9 @@ hasProcessingProvider=yes
 
 tags=raster,classification,remote sensing,forestry,sentinel,unsupervised,landcover
 
-changelog=0.2.0
+changelog=0.2.1
+    - Added: フォルダ入力で、出力先に同名の分類結果（<名前>_class.tif）が既にある場合の扱いを選べるようにした。「スキップする」（既定）「上書きする」「別名で保存する（_2 を付ける）」の3種類で、GUI とプロセシングの両方に追加。スキップを使うと、途中で止まった一括処理を続きから流し直せる。
+    0.2.0
     - Added: 入力モードを追加。「単一ファイル」と「フォルダ（再帰検索）」を切り替えられるようにした。単一ファイルではプロジェクトに読み込んでいないファイルも直接指定できる。
     - Added: フォルダ入力では、パターン（*.tif;*.vrt など）に合うラスタをサブフォルダまで検索し、一覧で処理対象を選べる。出力フォルダ内と本プラグインの出力（*_class.tif など）は自動的に除外する。
     - Added: フォルダ入力の処理方法として「モザイク（VRT にまとめて 1 回分類）」と「ファイルごと（ファイル単位で分類結果を出力）」を選択可能にした。ファイルごとでは、全ファイル共通のクラス定義（全ファイルから標本を集めて 1 回クラスタリング）と、入力フォルダ構成の再現を選べる。

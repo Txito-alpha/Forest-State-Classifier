@@ -211,6 +211,7 @@ class RinkyoClassifierPlugin:
             input_paths=params["input_paths"],
             input_root=params["input_root"],
             shared_signature=params["shared_signature"],
+            existing=params["existing"],
             keep_tree=params["keep_tree"],
         )
         task.taskCompleted.connect(lambda t=task: self._on_done(t))
@@ -224,6 +225,10 @@ class RinkyoClassifierPlugin:
     def _on_done(self, task: ClassifyTask):
         for msg in task.messages:
             QgsMessageLog.logMessage(msg, LOG_TAG, Qgis.Info)
+        if not task.results:
+            # 既存の出力があるため全部スキップした場合
+            self._push_summary(task, self.tr("処理したファイルはありません"))
+            return
         if task.mode == pipeline.MODE_EACH:
             self._on_batch_done(task)
             return

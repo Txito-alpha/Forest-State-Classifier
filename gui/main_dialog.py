@@ -251,6 +251,22 @@ class MainDialog(QDialog):
         self.basename = QLineEdit(self)
         self.basename.setPlaceholderText(self.tr("出力ファイル名の接頭辞"))
 
+        self.existing_combo = QComboBox(self)
+        self.existing_combo.addItem(self.tr("スキップする"),
+                                    pipeline.EXISTING_SKIP)
+        self.existing_combo.addItem(self.tr("上書きする"),
+                                    pipeline.EXISTING_OVERWRITE)
+        self.existing_combo.addItem(self.tr("別名で保存する（_2 を付ける）"),
+                                    pipeline.EXISTING_RENAME)
+        self.existing_combo.setToolTip(self.tr(
+            "フォルダ入力で、出力先に同名の分類結果（<名前>_class.tif）が\n"
+            "既にある場合の扱いです。\n"
+            "スキップ: そのファイルは処理しません。途中で止まった処理を\n"
+            "  続きから流し直すときに使えます。\n"
+            "上書き: 前の結果を置き換えます。\n"
+            "別名: <名前>_2_class.tif のように連番を付けて残します。\n"
+            "単一ファイルモードでは常に上書きします。"))
+
         self.likelihood_check = QCheckBox(self.tr("対数尤度ラスタも出力する"), self)
         self.likelihood_check.setChecked(True)
         self.likelihood_check.setToolTip(self.tr(
@@ -261,6 +277,7 @@ class MainDialog(QDialog):
         out_form = QFormLayout(out_box)
         out_form.addRow(self.tr("出力フォルダ"), out_row)
         out_form.addRow(self.tr("ファイル名"), self.basename)
+        out_form.addRow(self.tr("同名の出力があるとき"), self.existing_combo)
         out_form.addRow("", self.likelihood_check)
 
         self.note = QLabel(self.tr(
@@ -323,6 +340,7 @@ class MainDialog(QDialog):
 
     def _update_folder_ui(self, *_args) -> None:
         each = self.pipeline_mode() == pipeline.MODE_EACH
+        self.existing_combo.setEnabled(self.is_folder_mode())
         self.shared_check.setEnabled(each and not self.reuse_check.isChecked())
         self.keep_tree_check.setEnabled(each)
         if each:
@@ -606,6 +624,8 @@ class MainDialog(QDialog):
             "input_root": (os.path.normpath(self.folder_widget.filePath())
                            if folder else ""),
             "shared_signature": self.shared_check.isChecked(),
+            "existing": (self.existing_combo.currentData() if folder
+                         else pipeline.EXISTING_OVERWRITE),
             "keep_tree": self.keep_tree_check.isChecked(),
             "layer_name": layer_name,
             "bands": self.selected_bands(),
@@ -644,6 +664,7 @@ class MainDialog(QDialog):
         s.setValue("folder_mode", self.folder_mode.currentData())
         s.setValue("shared_signature", self.shared_check.isChecked())
         s.setValue("keep_tree", self.keep_tree_check.isChecked())
+        s.setValue("existing", self.existing_combo.currentData())
         s.endGroup()
 
     def _restore(self) -> None:
@@ -676,6 +697,8 @@ class MainDialog(QDialog):
         self.shared_check.setChecked(
             s.value("shared_signature", True, type=bool))
         self.keep_tree_check.setChecked(s.value("keep_tree", True, type=bool))
+        _select_data(self.existing_combo,
+                     s.value("existing", pipeline.EXISTING_SKIP, type=str))
         s.endGroup()
         if not self.out_dir.text():
             project_path = QgsProject.instance().homePath()

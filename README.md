@@ -20,6 +20,8 @@ classification are reimplemented in numpy.
 - Per-subcompartment (小班) aggregation
 - Folder input with recursive search: mosaic into one VRT, or classify file by file
   with a shared signature / フォルダ入力（再帰検索）: VRT モザイク、またはファイルごとの分類
+- Choose what to do when an output of the same name already exists: skip, overwrite
+  or keep both / 同名の出力があるとき: スキップ・上書き・別名保存を選択
 
 ## Requirements
 

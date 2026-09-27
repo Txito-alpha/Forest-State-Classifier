@@ -31,6 +31,9 @@ class ClassifyTask(QgsTask):
     - mode="each"  : input_paths をファイルごとに分類
       （shared_signature=True なら全ファイル共通のクラス定義）
 
+    existing で、同名の分類結果が既にある場合の扱い（上書き／スキップ／別名）
+    を指定する。
+
     signature を渡した場合はクラスタリングを飛ばし、既存の分類基準を
     そのまま当てる（別年次の画像へ同じクラス定義を適用する用途）。
     """
@@ -57,6 +60,7 @@ class ClassifyTask(QgsTask):
         input_root: str = "",
         shared_signature: bool = True,
         keep_tree: bool = True,
+        existing: str = pipeline.EXISTING_SKIP,
     ):
         title = "教師なし分類"
         if mode != pipeline.MODE_SINGLE:
@@ -75,6 +79,7 @@ class ClassifyTask(QgsTask):
             basename=basename,
             shared_signature=shared_signature,
             keep_tree=keep_tree,
+            existing=existing,
             n_classes=n_classes,
             max_samples=max_samples,
             min_class_size=min_class_size,

@@ -31,6 +31,7 @@ RECURSIVE = "RECURSIVE"
 PATTERN = "PATTERN"
 SHARED_SIGNATURE = "SHARED_SIGNATURE"
 KEEP_TREE = "KEEP_TREE"
+EXISTING = "EXISTING"
 CLASSES = "CLASSES"
 SAMPLES = "SAMPLES"
 MIN_SIZE = "MIN_SIZE"
@@ -46,6 +47,10 @@ CLASSIFIED_COUNT = "CLASSIFIED_COUNT"
 
 # INPUT_MODE の選択肢（並び順 = 値）
 MODE_VALUES = [pipeline.MODE_SINGLE, pipeline.MODE_MOSAIC, pipeline.MODE_EACH]
+
+# EXISTING の選択肢（並び順 = 値）
+EXISTING_VALUES = [pipeline.EXISTING_SKIP, pipeline.EXISTING_OVERWRITE,
+                   pipeline.EXISTING_RENAME]
 
 
 class UnsupervisedClassifyAlgorithm(QgsProcessingAlgorithm):
@@ -73,6 +78,11 @@ class UnsupervisedClassifyAlgorithm(QgsProcessingAlgorithm):
         self.addParameter(QgsProcessingParameterBoolean(
             KEEP_TREE,
             self.tr("ファイルごと: 入力のフォルダ構成を出力先に再現する"), True))
+        self.addParameter(QgsProcessingParameterEnum(
+            EXISTING, self.tr("フォルダモード: 同名の出力があるとき"),
+            options=[self.tr("スキップする"), self.tr("上書きする"),
+                     self.tr("別名で保存する（_2 を付ける）")],
+            defaultValue=0))
         self.addParameter(QgsProcessingParameterNumber(
             CLASSES, self.tr("初期クラス数"),
             QgsProcessingParameterNumber.Integer, 50, False, 2, 255))
@@ -188,6 +198,10 @@ class UnsupervisedClassifyAlgorithm(QgsProcessingAlgorithm):
             shared_signature=self.parameterAsBool(
                 parameters, SHARED_SIGNATURE, context),
             keep_tree=self.parameterAsBool(parameters, KEEP_TREE, context),
+            existing=(pipeline.EXISTING_OVERWRITE
+                      if mode == pipeline.MODE_SINGLE
+                      else EXISTING_VALUES[self.parameterAsEnum(
+                          parameters, EXISTING, context)]),
             n_classes=self.parameterAsInt(parameters, CLASSES, context),
             max_samples=self.parameterAsInt(parameters, SAMPLES, context),
             min_class_size=self.parameterAsInt(parameters, MIN_SIZE, context),
@@ -222,6 +236,9 @@ class UnsupervisedClassifyAlgorithm(QgsProcessingAlgorithm):
             if feedback.isCanceled():
                 return {OUTPUT: out_dir, CLASSIFIED_COUNT: 0}
             raise QgsProcessingException(str(exc)) from exc
+        if not outcome.results:
+            feedback.pushWarning(
+                self.tr("既存の出力があるため、処理したファイルはありません。"))
         return {OUTPUT: out_dir, CLASSIFIED_COUNT: len(outcome.results)}
 
     # -- 定型 --------------------------------------------------------------
@@ -255,7 +272,11 @@ class UnsupervisedClassifyAlgorithm(QgsProcessingAlgorithm):
             "標本を集めて 1 つのシグネチャで分類するので、クラス番号の意味が"
             "揃います。\n"
             "出力フォルダの中と、*_class.tif などこのプラグインの出力は"
-            "検索対象から除外します。")
+            "検索対象から除外します。\n\n"
+            "「同名の出力があるとき」で、出力先に同名の分類結果がある場合に"
+            "スキップするか、上書きするか、別名（_2）で保存するかを選べます。"
+            "スキップは、途中で止まった一括処理を続きから流し直すときに"
+            "使えます。")
 
     def createInstance(self):
         return UnsupervisedClassifyAlgorithm()

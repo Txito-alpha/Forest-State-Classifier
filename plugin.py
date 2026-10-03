@@ -48,15 +48,14 @@ class RinkyoClassifierPlugin:
 
     # -- QGIS インタフェース ----------------------------------------------
     def initGui(self):  # noqa: N802  QGIS の規約
-        icon_path = os.path.join(os.path.dirname(__file__), "icon.png")
-        icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
-
         self.toolbar = self._shared_toolbar()
 
-        run_action = QAction(icon, self.tr("教師なし分類を実行"),
+        run_action = QAction(self._icon("run_classify.png"),
+                             self.tr("教師なし分類を実行"),
                              self.iface.mainWindow())
         run_action.triggered.connect(self.run)
-        relabel_action = QAction(self.tr("分類結果の意味づけ…"),
+        relabel_action = QAction(self._icon("label_scatter.png"),
+                                 self.tr("分類結果の意味づけ…"),
                                  self.iface.mainWindow())
         relabel_action.triggered.connect(self.relabel)
         zonal_action = QAction(self.tr("小班別に集計…"),
@@ -67,8 +66,15 @@ class RinkyoClassifierPlugin:
             self.iface.addPluginToRasterMenu(self.tr(MENU_TITLE), action)
             self.actions.append(action)
         self.toolbar.addAction(run_action)
+        self.toolbar.addAction(relabel_action)
 
         self._register_provider()
+
+    @staticmethod
+    def _icon(filename: str) -> QIcon:
+        """icons/ 以下のアイコン。無ければ（破損パッケージ等）空アイコン。"""
+        path = os.path.join(os.path.dirname(__file__), "icons", filename)
+        return QIcon(path) if os.path.exists(path) else QIcon()
 
     def unload(self):
         for dialog in list(self._label_dialogs):
